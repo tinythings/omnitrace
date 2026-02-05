@@ -1,11 +1,11 @@
 use filescream::events::{Callback, EventMask, FileScreamEvent};
-use filescream::{FileScream, FileScriptConfig};
+use filescream::{FileScream, FileScreamConfig};
 use std::time::Duration;
 use tokio::sync::mpsc::channel;
 
 #[tokio::main]
 async fn main() {
-    let mut fs = FileScream::new(Some(FileScriptConfig::default().pulse(Duration::from_secs(1))));
+    let mut fs = FileScream::new(Some(FileScreamConfig::default().pulse(Duration::from_secs(1))));
 
     fs.watch("/tmp");
     fs.ignore("in*r/"); // E.g. ignore /tmp/inner/foo.txt but not /tmp/inner.txt

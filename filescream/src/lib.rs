@@ -14,29 +14,29 @@ use tokio::{sync::mpsc, task::spawn_blocking, time::Duration};
 pub mod events;
 
 #[derive(Clone)]
-struct IgnoreMatcher {
+struct PathGlobMatcher {
     any: GlobSet,
     dir_only: GlobSet,
 }
 
-impl Default for IgnoreMatcher {
+impl Default for PathGlobMatcher {
     fn default() -> Self {
         let empty = GlobSetBuilder::new().build().unwrap();
         Self { any: empty.clone(), dir_only: empty }
     }
 }
 
-pub struct FileScriptConfig {
+pub struct FileScreamConfig {
     pulse: Duration,
 }
 
-impl Default for FileScriptConfig {
+impl Default for FileScreamConfig {
     fn default() -> Self {
         Self { pulse: Duration::from_secs(3) }
     }
 }
 
-impl FileScriptConfig {
+impl FileScreamConfig {
     pub fn pulse(mut self, pulse: Duration) -> Self {
         self.pulse = pulse;
         self
@@ -57,12 +57,12 @@ pub struct FileScream {
     ignored: HashSet<String>, // glob patterns
     fstate: HashMap<PathBuf, Hash>,
     dstate: HashMap<PathBuf, DirStamp>,
-    config: FileScriptConfig,
+    config: FileScreamConfig,
     callbacks: Vec<Arc<dyn FileScreamCallback>>,
     results_tx: Option<mpsc::Sender<CallbackResult>>,
 
     is_primed: bool,
-    im: IgnoreMatcher,
+    im: PathGlobMatcher,
 }
 
 impl Default for FileScream {
@@ -72,7 +72,7 @@ impl Default for FileScream {
 }
 
 impl FileScream {
-    pub fn new(config: Option<FileScriptConfig>) -> Self {
+    pub fn new(config: Option<FileScreamConfig>) -> Self {
         Self {
             watched: HashSet::new(),
             ignored: HashSet::new(),
@@ -81,7 +81,7 @@ impl FileScream {
 
             config: config.unwrap_or_default(),
             is_primed: false,
-            im: IgnoreMatcher::default(),
+            im: PathGlobMatcher::default(),
             callbacks: Vec::new(),
             results_tx: None,
         }
@@ -107,13 +107,13 @@ impl FileScream {
     /// Add a glob pattern to ignore. Ignored paths will not be scanned or reported on.
     pub fn ignore<S: Into<String>>(&mut self, pattern: S) {
         self.ignored.insert(pattern.into());
-        self.im = self.compile_ignores(&self.ignored);
+        self.im = self.get_glob_matchers(&self.ignored);
     }
 
     /// Remove a glob pattern from being ignored.
     pub fn unignore<S: AsRef<str>>(&mut self, pattern: S) {
         self.ignored.remove(pattern.as_ref());
-        self.im = self.compile_ignores(&self.ignored);
+        self.im = self.get_glob_matchers(&self.ignored);
     }
 
     /// Add a callback to be invoked on file events.
@@ -135,32 +135,26 @@ impl FileScream {
         path.strip_prefix(dir).is_ok()
     }
 
-    async fn fire(&self, ev: FileScreamEvent) -> Vec<CallbackResult> {
-        let mut out = Vec::new();
-
+    async fn fire(&self, ev: FileScreamEvent) {
         for cb in &self.callbacks {
             if cb.mask().matches(&ev)
                 && let Some(r) = cb.call(&ev).await
+                && let Some(tx) = &self.results_tx
             {
-                out.push(r.clone());
-                if let Some(tx) = &self.results_tx {
-                    match tx.try_send(r) {
-                        Ok(_) => (),
-                        Err(e) => eprintln!("Failed to send callback result: {}", e),
-                    }
-                }
+                let _ = tx.send(r).await;
             }
         }
-
-        out
     }
 
-    fn compile_ignores(&self, patterns: &HashSet<String>) -> IgnoreMatcher {
-        let mut any_b = GlobSetBuilder::new();
-        let mut dir_b = GlobSetBuilder::new();
+    /// Compile glob patterns into matchers for efficient scanning.
+    /// Patterns ending with '/' are treated as directory-only, others match files and directories.
+    /// Leading '/' anchors the pattern to the filesystem root, otherwise it matches anywhere in the path.
+    /// Invalid patterns are ignored.
+    fn get_glob_matchers(&self, patterns: &HashSet<String>) -> PathGlobMatcher {
+        let mut all = GlobSetBuilder::new();
+        let mut dirs = GlobSetBuilder::new();
 
         for raw in patterns {
-            let dir_only = raw.ends_with('/');
             let pat = raw.trim_end_matches('/');
 
             // semantics:
@@ -174,26 +168,24 @@ impl FileScream {
                 Err(_) => continue, // ignore invalid patterns instead of panicking
             };
 
-            if dir_only {
-                dir_b.add(g);
+            if raw.ends_with('/') {
+                dirs.add(g);
             } else {
-                any_b.add(g);
+                all.add(g);
             }
         }
 
-        IgnoreMatcher {
-            any: any_b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap()),
-            dir_only: dir_b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap()),
+        PathGlobMatcher {
+            any: all.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap()),
+            dir_only: dirs.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap()),
         }
     }
 
-    fn scan(
-        roots: &[PathBuf], ignore: &IgnoreMatcher, prev_dir_state: &mut HashMap<PathBuf, DirStamp>, prev_files: &HashMap<PathBuf, Hash>,
-    ) -> HashMap<PathBuf, Hash> {
+    fn scan(roots: &[PathBuf], ignore: &PathGlobMatcher, dir_state: &mut HashMap<PathBuf, DirStamp>) -> HashMap<PathBuf, Hash> {
         let mut out = HashMap::new();
 
         for root in roots {
-            let mut stack = vec![root.clone()]; // depth first search
+            let mut stack = vec![root.clone()]; // DFS
 
             while let Some(path) = stack.pop() {
                 let meta = match std::fs::symlink_metadata(&path) {
@@ -204,24 +196,13 @@ impl FileScream {
                 let is_dir = meta.is_dir();
                 let s = path.to_string_lossy();
 
+                // ignore pruning
                 if (is_dir && ignore.dir_only.is_match(&*s)) || ignore.any.is_match(&*s) {
                     continue;
                 }
 
                 if is_dir {
-                    let stamp = DirStamp { mtime_ns: Self::mtime_ns(&meta) };
-                    let old = prev_dir_state.get(&path).copied();
-
-                    prev_dir_state.insert(path.clone(), stamp);
-
-                    if old.is_some() && old == Some(stamp) && path != *root {
-                        for (p, h) in prev_files.iter() {
-                            if Self::is_under(p.as_path(), path.as_path()) {
-                                out.insert(p.clone(), *h);
-                            }
-                        }
-                        continue;
-                    }
+                    dir_state.insert(path.clone(), DirStamp { mtime_ns: Self::mtime_ns(&meta) });
 
                     let rd = match read_dir(&path) {
                         Ok(rd) => rd,
@@ -237,7 +218,7 @@ impl FileScream {
                     h.update(&Self::mtime_ns(&meta).to_le_bytes());
                     out.insert(path, h.finalize());
                 } else {
-                    // XXX: Add symlinks/devices/etc
+                    // XXX: ignore symlinks/devices/etc for now
                 }
             }
         }
@@ -246,14 +227,13 @@ impl FileScream {
     }
 
     async fn scan_blocking(&mut self) -> (HashMap<PathBuf, Hash>, HashMap<PathBuf, DirStamp>) {
-        let roots = self.watched.clone();
-        let dir_state = std::mem::take(&mut self.dstate);
-        let prev_files = self.fstate.clone();
+        let roots: Vec<PathBuf> = self.watched.iter().cloned().collect();
         let ignore = self.im.clone();
+        let dir_state = std::mem::take(&mut self.dstate);
 
         spawn_blocking(move || {
             let mut ds = dir_state;
-            let files = Self::scan(&roots.iter().cloned().collect::<Vec<_>>(), &ignore, &mut ds, &prev_files);
+            let files = Self::scan(&roots, &ignore, &mut ds);
             (files, ds)
         })
         .await
@@ -275,21 +255,18 @@ impl FileScream {
             self.dstate = new_dir_state;
 
             for (path, new_hash) in &new_files {
-                let ev = match self.fstate.get(path) {
+                if let Some(ev) = match self.fstate.get(path) {
                     None => Some(FileScreamEvent::Created { path: path.clone() }),
                     Some(old_hash) if old_hash != new_hash => Some(FileScreamEvent::Changed { path: path.clone() }),
                     _ => None,
-                };
-
-                if let Some(ev) = ev {
-                    let _results = self.fire(ev).await; // ignore results for now
+                } {
+                    self.fire(ev).await;
                 }
             }
 
             for path in self.fstate.keys() {
                 if !new_files.contains_key(path) {
-                    let ev = FileScreamEvent::Removed { path: path.clone() };
-                    let _results = self.fire(ev).await; // ignore results for now
+                    self.fire(FileScreamEvent::Removed { path: path.clone() }).await;
                 }
             }
 
