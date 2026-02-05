@@ -1,10 +1,12 @@
-use blake3::Hash;
+use blake3::{Hash, Hasher};
 use hashbrown::HashMap;
 use std::{
     collections::HashSet,
+    fs::{Metadata, read_dir},
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
-use tokio::time::Duration;
+use tokio::{task::spawn_blocking, time::Duration};
 
 pub struct FileScriptConfig {
     pulse: Duration,
@@ -79,25 +81,53 @@ impl FileScream {
         self.ignored.remove(pattern.as_ref());
     }
 
-    fn mtime_ns(meta: &std::fs::Metadata) -> u128 {
-        meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
+    fn mtime_ns(meta: &Metadata) -> u128 {
+        meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
     }
 
-    fn is_under(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    /// Check if a path is under a given directory.
+    fn is_under(path: &Path, dir: &Path) -> bool {
         path.strip_prefix(dir).is_ok()
     }
 
-    fn scan(roots: &[PathBuf], prev_dir_state: &mut HashMap<PathBuf, DirStamp>, prev_files: &HashMap<PathBuf, Hash>) -> HashMap<PathBuf, Hash> {
+    /// Check if a path is ignored based on the set of patterns.
+    fn is_ignored(path: &Path, patterns: &HashSet<String>, is_dir: bool) -> bool {
+        let path_str = path.to_string_lossy();
+
+        patterns.iter().any(|p| {
+            let dir_only = p.ends_with('/');
+            if dir_only && !is_dir {
+                return false;
+            }
+
+            let pat = p.trim_end_matches('/');
+
+            if pat.starts_with('/') {
+                path_str.starts_with(pat)
+            } else {
+                let prefix = pat.trim_end_matches('*');
+                path.components().any(|c| c.as_os_str().to_string_lossy().starts_with(prefix))
+            }
+        })
+    }
+
+    fn scan(
+        roots: &[PathBuf], ignored: &HashSet<String>, prev_dir_state: &mut HashMap<PathBuf, DirStamp>, prev_files: &HashMap<PathBuf, Hash>,
+    ) -> HashMap<PathBuf, Hash> {
         let mut out = HashMap::new();
 
         for root in roots {
-            let mut stack = vec![root.clone()];
+            let mut stack = vec![root.clone()]; // depth first search
 
             while let Some(path) = stack.pop() {
                 let meta = match std::fs::symlink_metadata(&path) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
+
+                if Self::is_ignored(&path, ignored, meta.is_dir()) {
+                    continue;
+                }
 
                 if meta.is_dir() {
                     let stamp = DirStamp { mtime_ns: Self::mtime_ns(&meta) };
@@ -114,7 +144,7 @@ impl FileScream {
                         continue;
                     }
 
-                    let rd = match std::fs::read_dir(&path) {
+                    let rd = match read_dir(&path) {
                         Ok(rd) => rd,
                         Err(_) => continue,
                     };
@@ -123,7 +153,7 @@ impl FileScream {
                         stack.push(ent.path());
                     }
                 } else if meta.is_file() {
-                    let mut h = blake3::Hasher::new();
+                    let mut h = Hasher::new();
                     h.update(&meta.len().to_le_bytes());
                     h.update(&Self::mtime_ns(&meta).to_le_bytes());
                     out.insert(path, h.finalize());
@@ -140,10 +170,11 @@ impl FileScream {
         let roots = self.watched.clone();
         let dir_state = std::mem::take(&mut self.dstate);
         let prev_files = self.fstate.clone();
+        let ignored = self.ignored.clone();
 
-        tokio::task::spawn_blocking(move || {
+        spawn_blocking(move || {
             let mut ds = dir_state;
-            let files = Self::scan(&roots.iter().cloned().collect::<Vec<_>>(), &mut ds, &prev_files);
+            let files = Self::scan(&roots.iter().cloned().collect::<Vec<_>>(), &ignored, &mut ds, &prev_files);
             (files, ds)
         })
         .await
