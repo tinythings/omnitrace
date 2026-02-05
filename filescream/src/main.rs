@@ -25,9 +25,22 @@ async fn main() {
     });
     fs.add_callback(cb);
 
+    // Setup a channel to receive callback results (optional)
+    // and spawn a task to print them
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(0xfff);
+    fs.set_callback_channel(tx);
+    tokio::spawn(async move {
+        while let Some(r) = rx.recv().await {
+            println!("RESULT: {}", r);
+        }
+    });
+
+    // Start the file watcher (runs indefinitely)
     tokio::spawn(fs.run());
+
     // emulate your app doing other work
     loop {
-        tokio::time::sleep(Duration::from_secs(3600)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        println!("App is doing other work...");
     }
 }
