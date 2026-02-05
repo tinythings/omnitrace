@@ -132,11 +132,10 @@ impl FileScream {
         let mut out = Vec::new();
 
         for cb in &self.callbacks {
-            if cb.mask().matches(&ev) {
-                if let Some(r) = cb.call(&ev).await {
+            if cb.mask().matches(&ev)
+                && let Some(r) = cb.call(&ev).await {
                     out.push(r);
                 }
-            }
         }
 
         out

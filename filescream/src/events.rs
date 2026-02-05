@@ -35,6 +35,7 @@ pub trait FileScreamCallback: Send + Sync + 'static {
     fn call<'a>(&'a self, ev: &'a FileScreamEvent) -> BoxFuture<'a, Option<CallbackResult>>;
 }
 
+#[allow(clippy::type_complexity)]
 pub struct Callback {
     mask: EventMask,
     handlers: Vec<Arc<dyn Fn(FileScreamEvent) -> BoxFuture<'static, Option<CallbackResult>> + Send + Sync>>,
