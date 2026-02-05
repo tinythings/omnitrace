@@ -62,7 +62,6 @@ impl FileScreamCallback for Callback {
     }
 
     fn call<'a>(&'a self, ev: &'a FileScreamEvent) -> BoxFuture<'a, Option<CallbackResult>> {
-        // run all handlers sequentially, return the first non-None result
         Box::pin(async move {
             for h in &self.handlers {
                 if !self.mask.matches(ev) {

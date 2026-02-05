@@ -1,3 +1,4 @@
+use crate::events::{CallbackResult, FileScreamCallback, FileScreamEvent};
 use blake3::{Hash, Hasher};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hashbrown::HashMap;
@@ -8,9 +9,8 @@ use std::{
     sync::Arc,
     time::UNIX_EPOCH,
 };
-use tokio::{task::spawn_blocking, time::Duration};
+use tokio::{sync::mpsc, task::spawn_blocking, time::Duration};
 
-use crate::events::{FileScreamCallback, FileScreamEvent};
 pub mod events;
 
 #[derive(Clone)]
@@ -59,6 +59,7 @@ pub struct FileScream {
     dstate: HashMap<PathBuf, DirStamp>,
     config: FileScriptConfig,
     callbacks: Vec<Arc<dyn FileScreamCallback>>,
+    results_tx: Option<mpsc::Sender<CallbackResult>>,
 
     is_primed: bool,
     im: IgnoreMatcher,
@@ -82,6 +83,7 @@ impl FileScream {
             is_primed: false,
             im: IgnoreMatcher::default(),
             callbacks: Vec::new(),
+            results_tx: None,
         }
     }
 
@@ -119,6 +121,11 @@ impl FileScream {
         self.callbacks.push(Arc::new(cb));
     }
 
+    /// Set a channel to receive callback results. Results are JSON values returned by callbacks that matched an event.
+    pub fn set_callback_channel(&mut self, tx: tokio::sync::mpsc::Sender<events::CallbackResult>) {
+        self.results_tx = Some(tx);
+    }
+
     fn mtime_ns(meta: &Metadata) -> u128 {
         meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
     }
@@ -128,14 +135,21 @@ impl FileScream {
         path.strip_prefix(dir).is_ok()
     }
 
-    async fn fire(&self, ev: FileScreamEvent) -> Vec<events::CallbackResult> {
+    async fn fire(&self, ev: FileScreamEvent) -> Vec<CallbackResult> {
         let mut out = Vec::new();
 
         for cb in &self.callbacks {
             if cb.mask().matches(&ev)
-                && let Some(r) = cb.call(&ev).await {
-                    out.push(r);
+                && let Some(r) = cb.call(&ev).await
+            {
+                out.push(r.clone());
+                if let Some(tx) = &self.results_tx {
+                    match tx.try_send(r) {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("Failed to send callback result: {}", e),
+                    }
                 }
+            }
         }
 
         out
