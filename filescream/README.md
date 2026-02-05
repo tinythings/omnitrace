@@ -22,6 +22,43 @@ FileScream still works.
 - Not a thin wrapper around `inotify`
 - Not event-queue magic that explodes under load
 
+### Usage Example
+
+Here is a simple example how to use this:
+
+```rust
+// Create a watcher
+let mut fs = FileScream::new(Some(FileScriptConfig::default().pulse(Duration::from_secs(1))));
+
+// Tell what to watch
+fs.watch("/my/path");
+
+// Define a callback
+let cb = Callback::new(EventMask::CREATED).on(|ev| async move {
+    match ev {
+        FileScreamEvent::Created { path } => {
+            println!("File has been created: {:?}", path);
+            Some(serde_json::json!({ "event": "created", "path": path.to_string_lossy() }))
+        }
+    _ => None,
+    }
+});
+fs.add_callback(cb);
+
+// Setup a channel and start receiving data
+let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(0xfff);
+fs.set_callback_channel(tx);
+tokio::spawn(async move {
+    while let Some(r) = rx.recv().await {
+        println!("RESULT: {}", r);
+    }
+});
+
+// Begin listening
+tokio::spawn(fs.run());
+```
+
+Basically, just that.
 
 ## Pros
 - Works on **every Unix-like OS** (Linux, BSDs, QNX, etc.)
