@@ -1,6 +1,7 @@
 use filescream::events::{Callback, EventMask, FileScreamEvent};
 use filescream::{FileScream, FileScriptConfig};
 use std::time::Duration;
+use tokio::sync::mpsc::channel;
 
 #[tokio::main]
 async fn main() {
@@ -27,7 +28,7 @@ async fn main() {
 
     // Setup a channel to receive callback results (optional)
     // and spawn a task to print them
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(0xfff);
+    let (tx, mut rx) = channel::<serde_json::Value>(0xfff);
     fs.set_callback_channel(tx);
     tokio::spawn(async move {
         while let Some(r) = rx.recv().await {
