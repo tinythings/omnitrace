@@ -1,18 +1,52 @@
 # FileScream
 
-**FileScream** is a userspace-level little library that acts like
-`fanotify`/`inotify` on Linux, but doesn't turning your OS system
-into a brick, while scanning the entire `/usr` for example.
+**FileScream** is a userspace file-change detector that behaves like
+`fanotify` / `inotify` — without turning your system into a brick when
+you point it at large trees like `/usr`.
 
-It also doesn't cry if you are moving it to another OS, say BSD
-or QNX.
+It uses **intelligent metadata polling** instead of kernel event queues,
+which makes it portable, predictable, and immune to the usual watcher
+failure modes. In this case, if the kernel doesn’t support notifications,
+FileScream still works.
 
-Pros:
-  - Works on every *nix OS equally
-  - Works on every filesystem, even if it doesn't support notification
-  - Doesn't have "fallback" design
-  - Doesn't require external/3rd-party components
 
-Cons:
-  - Not kernel based. It has its overhead.
-  - It is a poller, so it is technically less CPU efficient
+## What it is
+- A **portable file and directory change detector**
+- Fully **userspace-based**
+- Designed for **embedded, constrained, and cross-OS environments**
+- Async-friendly (Tokio-based), no runtime ownership assumptions
+
+
+## What it is *not*
+- Not a kernel subsystem
+- Not a thin wrapper around `inotify`
+- Not event-queue magic that explodes under load
+
+
+## Pros
+- Works on **every Unix-like OS** (Linux, BSDs, QNX, etc.)
+- Works on **any filesystem**, even those without notification support
+- No kernel limits or queue overflows. And watcher count doesn't explode
+- No fallback paths, just one deterministic mechanism
+- No external services or third-party daemons
+
+
+## Cons
+Sorry, since physics still applies:
+- Userspace-based, so it has *some* overhead
+- As it is polling-based, it *theoretically* less CPU-efficient than perfect kernel events
+  *(in practice often **more** predictable and stable)*
+
+
+## Why FileScream exists
+Kernel file notification APIs are:
+- platform-specific
+- fragile under scale
+- inconsistent across filesystems
+- hostile to embedded and long-running systems
+
+FileScream trades instant kernel events for:
+- correctness
+- portability
+- bounded resource usage
+- sane behavior under real-world load

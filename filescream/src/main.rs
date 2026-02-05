@@ -7,7 +7,7 @@ async fn main() {
 
     tokio::spawn(fs.run());
 
-    // emulate "Sysinspect does other shit"
+    // emulate your app doing other work
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }
