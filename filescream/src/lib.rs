@@ -5,9 +5,13 @@ use std::{
     collections::HashSet,
     fs::{Metadata, read_dir},
     path::{Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 use tokio::{task::spawn_blocking, time::Duration};
+
+use crate::events::{FileScreamCallback, FileScreamEvent};
+pub mod events;
 
 #[derive(Clone)]
 struct IgnoreMatcher {
@@ -54,6 +58,7 @@ pub struct FileScream {
     fstate: HashMap<PathBuf, Hash>,
     dstate: HashMap<PathBuf, DirStamp>,
     config: FileScriptConfig,
+    callbacks: Vec<Arc<dyn FileScreamCallback>>,
 
     is_primed: bool,
     im: IgnoreMatcher,
@@ -76,6 +81,7 @@ impl FileScream {
             config: config.unwrap_or_default(),
             is_primed: false,
             im: IgnoreMatcher::default(),
+            callbacks: Vec::new(),
         }
     }
 
@@ -108,6 +114,11 @@ impl FileScream {
         self.im = self.compile_ignores(&self.ignored);
     }
 
+    /// Add a callback to be invoked on file events.
+    pub fn add_callback<C: FileScreamCallback>(&mut self, cb: C) {
+        self.callbacks.push(Arc::new(cb));
+    }
+
     fn mtime_ns(meta: &Metadata) -> u128 {
         meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
     }
@@ -115,6 +126,20 @@ impl FileScream {
     /// Check if a path is under a given directory.
     fn is_under(path: &Path, dir: &Path) -> bool {
         path.strip_prefix(dir).is_ok()
+    }
+
+    async fn fire(&self, ev: FileScreamEvent) -> Vec<events::CallbackResult> {
+        let mut out = Vec::new();
+
+        for cb in &self.callbacks {
+            if cb.mask().matches(&ev) {
+                if let Some(r) = cb.call(&ev).await {
+                    out.push(r);
+                }
+            }
+        }
+
+        out
     }
 
     fn compile_ignores(&self, patterns: &HashSet<String>) -> IgnoreMatcher {
@@ -237,16 +262,21 @@ impl FileScream {
             self.dstate = new_dir_state;
 
             for (path, new_hash) in &new_files {
-                match self.fstate.get(path) {
-                    None => println!("file {:?} created", path),
-                    Some(old_hash) if old_hash != new_hash => println!("file {:?} changed", path),
-                    _ => {}
+                let ev = match self.fstate.get(path) {
+                    None => Some(FileScreamEvent::Created { path: path.clone() }),
+                    Some(old_hash) if old_hash != new_hash => Some(FileScreamEvent::Changed { path: path.clone() }),
+                    _ => None,
+                };
+
+                if let Some(ev) = ev {
+                    let _results = self.fire(ev).await; // ignore results for now
                 }
             }
 
             for path in self.fstate.keys() {
                 if !new_files.contains_key(path) {
-                    println!("file {:?} removed", path);
+                    let ev = FileScreamEvent::Removed { path: path.clone() };
+                    let _results = self.fire(ev).await; // ignore results for now
                 }
             }
 
