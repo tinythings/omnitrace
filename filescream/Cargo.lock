@@ -142,6 +142,7 @@ name = "filescream"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "globset",
  "hashbrown",
  "ignore",
  "tokio",

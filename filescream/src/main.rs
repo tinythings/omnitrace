@@ -6,7 +6,7 @@ async fn main() {
     let mut fs = FileScream::new(Some(FileScriptConfig::default().pulse(Duration::from_secs(1))));
 
     fs.watch("/tmp");
-    fs.ignore("inner/"); // E.g. ignore /tmp/inner/foo.txt but not /tmp/inner.txt
+    fs.ignore("in*r/"); // E.g. ignore /tmp/inner/foo.txt but not /tmp/inner.txt
     tokio::spawn(fs.run());
 
     // emulate your app doing other work

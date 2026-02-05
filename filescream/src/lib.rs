@@ -1,4 +1,5 @@
 use blake3::{Hash, Hasher};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use hashbrown::HashMap;
 use std::{
     collections::HashSet,
@@ -7,6 +8,19 @@ use std::{
     time::UNIX_EPOCH,
 };
 use tokio::{task::spawn_blocking, time::Duration};
+
+#[derive(Clone)]
+struct IgnoreMatcher {
+    any: GlobSet,
+    dir_only: GlobSet,
+}
+
+impl Default for IgnoreMatcher {
+    fn default() -> Self {
+        let empty = GlobSetBuilder::new().build().unwrap();
+        Self { any: empty.clone(), dir_only: empty }
+    }
+}
 
 pub struct FileScriptConfig {
     pulse: Duration,
@@ -40,7 +54,9 @@ pub struct FileScream {
     fstate: HashMap<PathBuf, Hash>,
     dstate: HashMap<PathBuf, DirStamp>,
     config: FileScriptConfig,
+
     is_primed: bool,
+    im: IgnoreMatcher,
 }
 
 impl Default for FileScream {
@@ -55,30 +71,41 @@ impl FileScream {
             watched: HashSet::new(),
             ignored: HashSet::new(),
             fstate: HashMap::new(),
-            config: config.unwrap_or_default(),
             dstate: HashMap::new(),
+
+            config: config.unwrap_or_default(),
             is_primed: false,
+            im: IgnoreMatcher::default(),
         }
     }
 
     /// Add a directory to watch. Subdirectories will be watched as well.
     pub fn watch<P: AsRef<Path>>(&mut self, path: P) {
-        self.watched.insert(path.as_ref().to_path_buf());
+        if let Ok(p) = path.as_ref().canonicalize() {
+            self.watched.insert(p);
+        } else {
+            self.watched.insert(path.as_ref().to_path_buf());
+        }
     }
-
     /// Remove a directory from being watched.
     pub fn unwatch<P: AsRef<Path>>(&mut self, path: P) {
-        self.watched.remove(path.as_ref());
+        if let Ok(p) = path.as_ref().canonicalize() {
+            self.watched.remove(&p);
+        } else {
+            self.watched.remove(path.as_ref());
+        }
     }
 
     /// Add a glob pattern to ignore. Ignored paths will not be scanned or reported on.
     pub fn ignore<S: Into<String>>(&mut self, pattern: S) {
         self.ignored.insert(pattern.into());
+        self.im = self.compile_ignores(&self.ignored);
     }
 
     /// Remove a glob pattern from being ignored.
     pub fn unignore<S: AsRef<str>>(&mut self, pattern: S) {
         self.ignored.remove(pattern.as_ref());
+        self.im = self.compile_ignores(&self.ignored);
     }
 
     fn mtime_ns(meta: &Metadata) -> u128 {
@@ -90,29 +117,40 @@ impl FileScream {
         path.strip_prefix(dir).is_ok()
     }
 
-    /// Check if a path is ignored based on the set of patterns.
-    fn is_ignored(path: &Path, patterns: &HashSet<String>, is_dir: bool) -> bool {
-        let path_str = path.to_string_lossy();
+    fn compile_ignores(&self, patterns: &HashSet<String>) -> IgnoreMatcher {
+        let mut any_b = GlobSetBuilder::new();
+        let mut dir_b = GlobSetBuilder::new();
 
-        patterns.iter().any(|p| {
-            let dir_only = p.ends_with('/');
-            if dir_only && !is_dir {
-                return false;
-            }
+        for raw in patterns {
+            let dir_only = raw.ends_with('/');
+            let pat = raw.trim_end_matches('/');
 
-            let pat = p.trim_end_matches('/');
+            // semantics:
+            //  - leading '/' => anchored at filesystem root (absolute path string starts with '/')
+            //  - no leading '/' => match anywhere in path => "**/<pat>"
+            let compiled = if pat.starts_with('/') { pat.to_string() } else { format!("**/{}", pat) };
 
-            if pat.starts_with('/') {
-                path_str.starts_with(pat)
+            // Compile glob
+            let g = match Glob::new(&compiled) {
+                Ok(g) => g,
+                Err(_) => continue, // ignore invalid patterns instead of panicking
+            };
+
+            if dir_only {
+                dir_b.add(g);
             } else {
-                let prefix = pat.trim_end_matches('*');
-                path.components().any(|c| c.as_os_str().to_string_lossy().starts_with(prefix))
+                any_b.add(g);
             }
-        })
+        }
+
+        IgnoreMatcher {
+            any: any_b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap()),
+            dir_only: dir_b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap()),
+        }
     }
 
     fn scan(
-        roots: &[PathBuf], ignored: &HashSet<String>, prev_dir_state: &mut HashMap<PathBuf, DirStamp>, prev_files: &HashMap<PathBuf, Hash>,
+        roots: &[PathBuf], ignore: &IgnoreMatcher, prev_dir_state: &mut HashMap<PathBuf, DirStamp>, prev_files: &HashMap<PathBuf, Hash>,
     ) -> HashMap<PathBuf, Hash> {
         let mut out = HashMap::new();
 
@@ -125,11 +163,14 @@ impl FileScream {
                     Err(_) => continue,
                 };
 
-                if Self::is_ignored(&path, ignored, meta.is_dir()) {
+                let is_dir = meta.is_dir();
+                let s = path.to_string_lossy();
+
+                if (is_dir && ignore.dir_only.is_match(&*s)) || ignore.any.is_match(&*s) {
                     continue;
                 }
 
-                if meta.is_dir() {
+                if is_dir {
                     let stamp = DirStamp { mtime_ns: Self::mtime_ns(&meta) };
                     let old = prev_dir_state.get(&path).copied();
 
@@ -170,11 +211,11 @@ impl FileScream {
         let roots = self.watched.clone();
         let dir_state = std::mem::take(&mut self.dstate);
         let prev_files = self.fstate.clone();
-        let ignored = self.ignored.clone();
+        let ignore = self.im.clone();
 
         spawn_blocking(move || {
             let mut ds = dir_state;
-            let files = Self::scan(&roots.iter().cloned().collect::<Vec<_>>(), &ignored, &mut ds, &prev_files);
+            let files = Self::scan(&roots.iter().cloned().collect::<Vec<_>>(), &ignore, &mut ds, &prev_files);
             (files, ds)
         })
         .await
