@@ -74,21 +74,26 @@ Sorry, since physics still applies:
 - As it is polling-based, it *theoretically* less CPU-efficient than perfect kernel events
   *(in practice often **more** predictable and stable)*
 
-## TODOs (next steps)
+## Features
 
+- [x] Watch a single file
+- [x] Watch a directory
+- [x] Ignoring glob patterns per file and per directory
 - [ ] Symlink watches
 - [ ] File attribute changes, permissions
 - [ ] File renames/moves
 
 ## Why FileScream exists
+
 Kernel file notification APIs are:
 - platform-specific
 - fragile under scale
-- inconsistent across filesystems
-- hostile to embedded and long-running systems
+- inconsistent (or unavailable at all) across filesystems
+- possibly broken on different setups (e.g. squashfs + overlayfs)
+- hostile to embedded systems
 
 FileScream trades instant kernel events for:
 - correctness
-- portability
+- highest portability
+- determinism
 - bounded resource usage
-- sane behavior under real-world load
