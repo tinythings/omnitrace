@@ -130,11 +130,6 @@ impl FileScream {
         meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
     }
 
-    /// Check if a path is under a given directory.
-    fn is_under(path: &Path, dir: &Path) -> bool {
-        path.strip_prefix(dir).is_ok()
-    }
-
     async fn fire(&self, ev: FileScreamEvent) {
         for cb in &self.callbacks {
             if cb.mask().matches(&ev)
