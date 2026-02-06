@@ -74,6 +74,11 @@ Sorry, since physics still applies:
 - As it is polling-based, it *theoretically* less CPU-efficient than perfect kernel events
   *(in practice often **more** predictable and stable)*
 
+## TODOs (next steps)
+
+- [ ] Symlink watches
+- [ ] File attribute changes, permissions
+- [ ] File renames/moves
 
 ## Why FileScream exists
 Kernel file notification APIs are:
