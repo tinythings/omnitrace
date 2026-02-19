@@ -15,7 +15,10 @@ async fn main() {
     #[cfg(target_os = "linux")]
     dog.set_backend(procdog::backends::linuxps::LinuxPsBackend);
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "netbsd")]
+    dog.set_backend(procdog::backends::netbsd_sysctl::NetBsdSysctlBackend);
+
+    #[cfg(all(not(target_os = "linux"), not(target_os = "netbsd")))]
     dog.set_backend(procdog::backends::stps::PsBackend);
 
     // Add processes to watch (you can add/remove at runtime)
