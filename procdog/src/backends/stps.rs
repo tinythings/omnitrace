@@ -7,7 +7,7 @@ impl ProcBackend for PsBackend {
         use tokio::process::Command;
 
         let out = Command::new("ps")
-            .args(["-eo", "pid,comm"])
+            .args(["-ax", "-o", "pid=", "-o", "comm="])
             .output()
             .await?;
 
