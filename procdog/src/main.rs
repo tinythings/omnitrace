@@ -10,6 +10,15 @@ async fn main() {
     let mut dog = ProcDog::new(Some(
         ProcDogConfig::default().interval(Duration::from_secs(1)),
     ));
+
+    // Set a proper backend for your platform (optional, will auto-detect)
+    #[cfg(target_os = "linux")]
+    dog.set_backend(procdog::backends::linuxps::LinuxPsBackend);
+
+    #[cfg(not(target_os = "linux"))]
+    dog.set_backend(procdog::backends::stps::PsBackend);
+
+    // Add processes to watch (you can add/remove at runtime)
     dog.watch("bash"); // or any other different shell, or "python", etc.
 
     let cb = Callback::new(EventMask::APPEARED | EventMask::DISAPPEARED).on(|ev| async move {
