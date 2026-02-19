@@ -37,22 +37,16 @@ impl ProcDogConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProcState {
-    Running { pid: i32 },
-    Stopped,
-}
-
 pub struct ProcDog {
     watched: HashSet<String>,
     ignored: HashSet<String>,
-    state: HashMap<String, ProcState>,
+
+    // name -> active PIDs
+    state: HashMap<String, HashSet<i32>>,
 
     config: ProcDogConfig,
     callbacks: Vec<Arc<dyn ProcDogCallback>>,
     results_tx: Option<mpsc::Sender<CallbackResult>>,
-
-    is_primed: bool,
     backend: Arc<dyn ProcBackend>,
 }
 
@@ -65,7 +59,6 @@ impl ProcDog {
             config: cfg.unwrap_or_default(),
             callbacks: Vec::new(),
             results_tx: None,
-            is_primed: false,
             backend: Arc::new(backends::stps::PsBackend),
         }
     }
@@ -111,16 +104,15 @@ impl ProcDog {
                     continue;
                 }
 
-                if let Some((pid, _)) = procs.iter().find(|(_, n)| n == name) {
-                    self.state
-                        .insert(name.clone(), ProcState::Running { pid: *pid });
-                } else {
-                    self.state.insert(name.clone(), ProcState::Stopped);
-                }
+                let pids: HashSet<i32> = procs
+                    .iter()
+                    .filter(|(_, n)| n == name)
+                    .map(|(pid, _)| *pid)
+                    .collect();
+
+                self.state.insert(name.clone(), pids);
             }
         }
-
-        self.is_primed = true;
     }
 
     async fn tick_once(&mut self) {
@@ -134,44 +126,38 @@ impl ProcDog {
                 continue;
             }
 
-            let found = procs.iter().find(|(_, n)| n == name);
+            let current: HashSet<i32> = procs
+                .iter()
+                .filter(|(_, n)| n == name)
+                .map(|(pid, _)| *pid)
+                .collect();
 
-            let current = self.state.get(name).copied().unwrap_or(ProcState::Stopped);
+            let previous = self.state.get(name).cloned().unwrap_or_default();
 
-            match (current, found) {
-                (ProcState::Stopped, Some((pid, _))) => {
-                    self.state
-                        .insert(name.clone(), ProcState::Running { pid: *pid });
+            // Determine diffs without holding mutable borrow
+            let appeared: Vec<i32> = current.difference(&previous).copied().collect();
 
-                    self.fire(ProcDogEvent::Appeared {
-                        name: name.clone(),
-                        pid: *pid,
-                    })
-                    .await;
-                }
+            let disappeared: Vec<i32> = previous.difference(&current).copied().collect();
 
-                (ProcState::Running { pid: old_pid }, Some((new_pid, _)))
-                    if old_pid != *new_pid =>
-                {
-                    self.state
-                        .insert(name.clone(), ProcState::Running { pid: *new_pid });
-
-                    self.fire(ProcDogEvent::Appeared {
-                        name: name.clone(),
-                        pid: *new_pid,
-                    })
-                    .await;
-                }
-
-                (ProcState::Running { .. }, None) => {
-                    self.state.insert(name.clone(), ProcState::Stopped);
-
-                    self.fire(ProcDogEvent::Disappeared { name: name.clone() })
-                        .await;
-                }
-
-                _ => {}
+            // Fire events
+            for pid in &appeared {
+                self.fire(ProcDogEvent::Appeared {
+                    name: name.clone(),
+                    pid: *pid,
+                })
+                .await;
             }
+
+            for pid in &disappeared {
+                self.fire(ProcDogEvent::Disappeared {
+                    name: name.clone(),
+                    pid: *pid,
+                })
+                .await;
+            }
+
+            // Now update state
+            self.state.insert(name.clone(), current);
         }
     }
 

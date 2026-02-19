@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub enum ProcDogEvent {
     Appeared { name: String, pid: i32 },
-    Disappeared { name: String },
+    Disappeared { name: String, pid: i32 },
 }
 
 bitflags::bitflags! {
