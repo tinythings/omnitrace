@@ -52,7 +52,6 @@ impl crate::ProcBackend for NetBsdSysctlBackend {
                 tries += 1;
                 mib[5] = count as libc::c_int;
 
-                // allocate a bit extra so it doesn't ENOMEM immediately if proc table grows
                 let alloc_bytes = (count + 64) * ksz;
                 buf = vec![0u8; alloc_bytes];
                 out_size = alloc_bytes as libc::size_t;
@@ -67,6 +66,7 @@ impl crate::ProcBackend for NetBsdSysctlBackend {
                 );
 
                 if rc == 0 {
+                    // truncate to what kernel actually wrote
                     buf.truncate(out_size as usize);
                     break;
                 }
@@ -80,12 +80,18 @@ impl crate::ProcBackend for NetBsdSysctlBackend {
                 return Err(err);
             }
 
-            let n = (out_size as usize) / ksz;
+            // Only parse full records
+            let usable = (buf.len() / ksz) * ksz;
+            buf.truncate(usable);
+
+            let n = buf.len() / ksz;
             let mut out = Vec::with_capacity(n);
 
             for i in 0..n {
-                let p = buf.as_ptr().add(i * ksz) as *const libc::kinfo_proc2;
-                let kp = &*p;
+                let base = buf.as_ptr().add(i * ksz) as *const libc::kinfo_proc2;
+
+                // Avoid UB: buffer is u8-aligned, so read as unaligned
+                let kp: libc::kinfo_proc2 = std::ptr::read_unaligned(base);
 
                 let pid = kp.p_pid as i32;
 
