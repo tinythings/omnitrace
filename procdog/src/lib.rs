@@ -38,7 +38,7 @@ impl ProcDogConfig {
         self.interval
     }
 
-    pub fn emit_missing_on_start(mut self, on: bool) -> Self {
+    pub fn emit_on_start(mut self, on: bool) -> Self {
         self.emit_missing_on_start = on;
         self
     }

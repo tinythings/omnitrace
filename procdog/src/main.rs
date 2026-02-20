@@ -10,7 +10,7 @@ async fn main() {
     let mut dog = ProcDog::new(Some(
         ProcDogConfig::default()
             .interval(Duration::from_secs(1))
-            .emit_missing_on_start(true),
+            .emit_on_start(true),
     ));
 
     // Set a proper backend for your platform (optional, will auto-detect)
