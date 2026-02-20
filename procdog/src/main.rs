@@ -8,7 +8,9 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() {
     let mut dog = ProcDog::new(Some(
-        ProcDogConfig::default().interval(Duration::from_secs(1)),
+        ProcDogConfig::default()
+            .interval(Duration::from_secs(1))
+            .emit_on_start(true),
     ));
 
     // Set a proper backend for your platform (optional, will auto-detect)
@@ -22,12 +24,14 @@ async fn main() {
     dog.set_backend(procdog::backends::stps::PsBackend);
 
     // Add processes to watch (you can add/remove at runtime)
-    dog.watch("bash"); // or any other different shell, or "python", etc.
+    dog.watch("perl"); // or any other different shell, or "python", etc.
 
-    let cb = Callback::new(EventMask::APPEARED | EventMask::DISAPPEARED).on(|ev| async move {
-        println!("EVENT: {:?}", ev);
-        None
-    });
+    let cb = Callback::new(EventMask::APPEARED | EventMask::MISSING | EventMask::DISAPPEARED).on(
+        |ev| async move {
+            println!("EVENT: {:?}", ev);
+            None
+        },
+    );
 
     dog.add_callback(cb);
 

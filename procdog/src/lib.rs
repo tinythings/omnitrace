@@ -16,12 +16,14 @@ pub trait ProcBackend: Send + Sync {
 
 pub struct ProcDogConfig {
     interval: Duration,
+    emit_missing_on_start: bool,
 }
 
 impl Default for ProcDogConfig {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(1),
+            emit_missing_on_start: false,
         }
     }
 }
@@ -34,6 +36,11 @@ impl ProcDogConfig {
 
     fn get_interval(&self) -> Duration {
         self.interval
+    }
+
+    pub fn emit_on_start(mut self, on: bool) -> Self {
+        self.emit_missing_on_start = on;
+        self
     }
 }
 
@@ -109,6 +116,11 @@ impl ProcDog {
                     .filter(|(_, n)| n == name)
                     .map(|(pid, _)| *pid)
                     .collect();
+
+                if self.config.emit_missing_on_start && pids.is_empty() {
+                    self.fire(ProcDogEvent::Missing { name: name.clone() })
+                        .await;
+                }
 
                 self.state.insert(name.clone(), pids);
             }

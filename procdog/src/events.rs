@@ -6,6 +6,7 @@ use std::sync::Arc;
 pub enum ProcDogEvent {
     Appeared { name: String, pid: i32 },
     Disappeared { name: String, pid: i32 },
+    Missing { name: String },
 }
 
 bitflags::bitflags! {
@@ -13,6 +14,7 @@ bitflags::bitflags! {
     pub struct EventMask: u8 {
         const APPEARED    = 0b0001;
         const DISAPPEARED = 0b0010;
+        const MISSING     = 0b0100;
     }
 }
 
@@ -21,6 +23,7 @@ impl EventMask {
         match ev {
             ProcDogEvent::Appeared { .. } => self.contains(EventMask::APPEARED),
             ProcDogEvent::Disappeared { .. } => self.contains(EventMask::DISAPPEARED),
+            ProcDogEvent::Missing { .. } => self.contains(EventMask::MISSING),
         }
     }
 }
