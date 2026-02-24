@@ -202,6 +202,7 @@ impl XMount {
         })
     }
 
+    #[cfg(target_os = "linux")]
     fn read_mountinfo(path: &Path) -> io::Result<Vec<MountInfo>> {
         let txt = std::fs::read_to_string(path)?;
         let mut out = Vec::new();
@@ -211,6 +212,11 @@ impl XMount {
             }
         }
         Ok(out)
+    }
+
+    #[cfg(target_os = "netbsd")]
+    fn read_mountinfo(_path: &Path) -> io::Result<Vec<MountInfo>> {
+        netbsd_mounts::read_mounts()
     }
 
     fn snapshot_for_watched(&self, all: &[MountInfo]) -> HashMap<PathBuf, MountInfo> {
@@ -225,14 +231,21 @@ impl XMount {
     }
 
     fn materially_diff(a: &MountInfo, b: &MountInfo) -> bool {
-        // decide what counts as "Changed"
-        a.mount_id != b.mount_id
-            || a.parent_id != b.parent_id
-            || a.root != b.root
-            || a.fstype != b.fstype
-            || a.source != b.source
-            || a.mount_opts != b.mount_opts
-            || a.super_opts != b.super_opts
+        #[cfg(target_os = "netbsd")]
+        {
+            a.fstype != b.fstype || a.source != b.source || a.mount_opts != b.mount_opts
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            a.mount_id != b.mount_id
+                || a.parent_id != b.parent_id
+                || a.root != b.root
+                || a.fstype != b.fstype
+                || a.source != b.source
+                || a.mount_opts != b.mount_opts
+                || a.super_opts != b.super_opts
+        }
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -297,6 +310,90 @@ impl XMount {
             }
 
             self.last = now;
+        }
+    }
+}
+
+#[cfg(target_os = "netbsd")]
+fn c_char_array_to_string(buf: &[libc::c_char]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let bytes: Vec<u8> = buf[..len].iter().map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(target_os = "netbsd")]
+fn mount_flags_to_opts(flags: u64) -> String {
+    // NetBSD statvfs flags are ST_*; we only map the obvious ones.
+    // If you want the full list, expand it.
+    let mut out = Vec::new();
+
+    // These names come from NetBSD statvfs docs. :contentReference[oaicite:3]{index=3}
+    const ST_RDONLY: u64 = 0x0000_0001;
+    const ST_NOEXEC: u64 = 0x0000_0002;
+    const ST_NOSUID: u64 = 0x0000_0008;
+    const ST_NODEV: u64 = 0x0000_0010;
+
+    out.push(if (flags & ST_RDONLY) != 0 { "ro" } else { "rw" });
+
+    if (flags & ST_NOEXEC) != 0 {
+        out.push("noexec");
+    }
+    if (flags & ST_NOSUID) != 0 {
+        out.push("nosuid");
+    }
+    if (flags & ST_NODEV) != 0 {
+        out.push("nodev");
+    }
+
+    out.join(",")
+}
+
+#[cfg(target_os = "netbsd")]
+mod netbsd_mounts {
+    use super::*;
+    use std::{io, ptr};
+
+    // NetBSD uses versioned symbols; this avoids ABI mismatch pain. :contentReference[oaicite:4]{index=4}
+    extern "C" {
+        #[link_name = "__getmntinfo13"]
+        fn getmntinfo(mntbufp: *mut *mut libc::statvfs, flags: libc::c_int) -> libc::c_int;
+    }
+
+    // NetBSD flags for getmntinfo forward to getvfsstat(2). :contentReference[oaicite:5]{index=5}
+    const MNT_NOWAIT: libc::c_int = 2;
+
+    pub fn read_mounts() -> io::Result<Vec<MountInfo>> {
+        unsafe {
+            let mut buf: *mut libc::statvfs = ptr::null_mut();
+            let n = getmntinfo(&mut buf as *mut *mut libc::statvfs, MNT_NOWAIT);
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let slice = std::slice::from_raw_parts(buf, n as usize);
+            let mut out = Vec::with_capacity(slice.len());
+
+            for sv in slice {
+                // Field layout is defined by NetBSD statvfs(5). :contentReference[oaicite:6]{index=6}
+                let fstype = c_char_array_to_string(&sv.f_fstypename);
+                let target = c_char_array_to_string(&sv.f_mntonname);
+                let source = c_char_array_to_string(&sv.f_mntfromname);
+
+                let mount_opts = mount_flags_to_opts(sv.f_flag as u64);
+
+                out.push(MountInfo {
+                    mount_id: 0,
+                    parent_id: 0,
+                    mount_point: PathBuf::from(target),
+                    root: PathBuf::from("/"),
+                    fstype,
+                    source,
+                    mount_opts,
+                    super_opts: String::new(),
+                });
+            }
+
+            Ok(out)
         }
     }
 }
