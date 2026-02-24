@@ -1,0 +1,302 @@
+pub mod events;
+
+use crate::events::{CallbackResult, MountInfo, XMountCallback, XMountEvent};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{sync::mpsc, time};
+
+/// Configuration for the XMount monitor.
+///
+/// Controls polling interval and the path to the mountinfo file to read.
+pub struct XMountConfig {
+    /// Time interval between polling mountinfo for changes
+    pulse: Duration,
+
+    /// Path to the mountinfo file (typically /proc/self/mountinfo)
+    mountinfo_path: PathBuf,
+}
+
+/// Main struct for monitoring mount events.
+impl Default for XMountConfig {
+    fn default() -> Self {
+        Self {
+            pulse: Duration::from_secs(1),
+            mountinfo_path: PathBuf::from("/proc/self/mountinfo"),
+        }
+    }
+}
+
+impl XMountConfig {
+    pub fn pulse(mut self, pulse: Duration) -> Self {
+        self.pulse = pulse;
+        self
+    }
+
+    pub fn mountinfo_path<P: AsRef<Path>>(mut self, p: P) -> Self {
+        self.mountinfo_path = p.as_ref().to_path_buf();
+        self
+    }
+}
+
+/// Main struct for monitoring mount events.
+pub struct XMount {
+    watched: HashSet<PathBuf>,
+    config: XMountConfig,
+
+    callbacks: Vec<Arc<dyn XMountCallback>>,
+    results_tx: Option<mpsc::Sender<CallbackResult>>,
+
+    // last known per watched mountpoint
+    last: HashMap<PathBuf, MountInfo>,
+    is_primed: bool,
+}
+
+impl Default for XMount {
+    fn default() -> Self {
+        Self::new(XMountConfig::default())
+    }
+}
+
+impl XMount {
+    /// Create a new XMount monitor with the given configuration.
+    /// The monitor won't start until you call run(), and you can still add watched mountpoints and callbacks after that.
+    /// The configuration controls the polling interval and the path to the mountinfo file to read.
+    /// The default configuration polls every 1 second and reads from /proc/self/mountinfo, which is usually what you want.
+    pub fn new(config: XMountConfig) -> Self {
+        Self {
+            watched: HashSet::new(),
+            config,
+            callbacks: Vec::new(),
+            results_tx: None,
+            last: HashMap::new(),
+            is_primed: false,
+        }
+    }
+
+    /// Add a mountpoint (target) to watch.
+    /// You can add any path, but only those that actually appear in /proc/self/mountinfo will trigger events.
+    /// For example, if you add "/mnt/usb" but it never appears in mountinfo, you won't get any events.
+    /// If you add "/" or "/mnt" or "/tmp", you'll get events for those (and they often do appear in mountinfo), but that may be very noisy.
+    /// If you add something that appears in mountinfo but isn't actually a mountpoint (e.g. "/home/user"), you'll
+    /// get events for it when it appears in mountinfo, but that may be confusing.
+    ///
+    /// In general, it's best to add specific mountpoints you care about, but the library won't stop you from adding anything.
+    /// The library will canonicalize paths if possible, so adding "/mnt/usb" and "/mnt/./usb" will watch the same thing.
+    ///
+    /// If a watched mountpoint is missing from mountinfo, it will be treated as unmounted (but won't trigger an
+    /// Unmounted event until it was previously seen as mounted).
+    pub fn add<P: AsRef<Path>>(&mut self, mountpoint: P) {
+        // canonicalize if possible; for mountpoints it’s usually fine either way
+        if let Ok(p) = mountpoint.as_ref().canonicalize() {
+            self.watched.insert(p);
+        } else {
+            self.watched.insert(mountpoint.as_ref().to_path_buf());
+        }
+    }
+
+    /// Remove a mountpoint from being watched.
+    /// If the mountpoint was previously seen as mounted, it will be treated as unmounted (but won't trigger an Unmounted event since it's no longer watched).
+    /// The library will canonicalize paths if possible, so removing "/mnt/usb" and "/mnt/./usb" will remove the same thing.
+    /// If you remove a mountpoint that wasn't being watched, nothing happens.
+    /// If you remove a mountpoint that was being watched but is currently missing from mountinfo, it will just stop being watched without any events.
+    /// In general, you can add and remove mountpoints at any time, even after run() has started, and the library will handle it gracefully.
+    pub fn remove<P: AsRef<Path>>(&mut self, mountpoint: P) {
+        if let Ok(p) = mountpoint.as_ref().canonicalize() {
+            self.watched.remove(&p);
+        } else {
+            self.watched.remove(mountpoint.as_ref());
+        }
+    }
+
+    /// Add a callback to be called when mount events occur.
+    /// Callbacks are called in the order they are added.
+    /// If a callback returns a result, it will be sent to the callback channel if one is set.
+    pub fn add_callback<C: XMountCallback>(&mut self, cb: C) {
+        self.callbacks.push(Arc::new(cb));
+    }
+
+    /// Set the channel to send callback results to.
+    /// If a callback returns a result, it will be sent to this channel.
+    pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
+        self.results_tx = Some(tx);
+    }
+
+    /// Check if an event matches the callback's mask.
+    /// For example, if the callback's mask is MOUNTED | UNMOUNTED, it will match Mounted and Unmounted events but not Changed events.
+    async fn fire(&self, ev: XMountEvent) {
+        for cb in &self.callbacks {
+            if cb.mask().matches(&ev)
+                && let Some(r) = cb.call(&ev).await
+                && let Some(tx) = &self.results_tx
+            {
+                let _ = tx.send(r).await;
+            }
+        }
+    }
+
+    /// Linux mountinfo escapes spaces as \040 etc.
+    fn unescape_mount_field(s: &str) -> String {
+        // minimal: handle \040 \011 \012 \134
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 3 < bytes.len() {
+                let a = bytes[i + 1];
+                let b = bytes[i + 2];
+                let c = bytes[i + 3];
+                if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() {
+                    let oct =
+                        ((a - b'0') as u32) * 64 + ((b - b'0') as u32) * 8 + ((c - b'0') as u32);
+                    if let Some(ch) = char::from_u32(oct) {
+                        out.push(ch);
+                        i += 4;
+                        continue;
+                    }
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+    /// Parse a line from mountinfo into a MountInfo struct.
+    fn parse_mountinfo_line(line: &str) -> Option<MountInfo> {
+        // format: mountID parentID major:minor root mount_point options optional_fields... - fstype source super_options
+        let mut parts = line.split_whitespace();
+
+        let mount_id: u32 = parts.next()?.parse().ok()?;
+        let parent_id: u32 = parts.next()?.parse().ok()?;
+        let _majmin = parts.next()?; // ignore
+
+        let root = Self::unescape_mount_field(parts.next()?);
+        let mount_point = Self::unescape_mount_field(parts.next()?);
+        let mount_opts = parts.next()?.to_string();
+
+        // skip optional fields until "-"
+        for p in &mut parts {
+            if p == "-" {
+                break;
+            }
+        }
+
+        let fstype = parts.next()?.to_string();
+        let source = Self::unescape_mount_field(parts.next()?);
+        let super_opts = parts.next().unwrap_or("").to_string();
+
+        Some(MountInfo {
+            mount_id,
+            parent_id,
+            mount_point: PathBuf::from(mount_point),
+            root: PathBuf::from(root),
+            fstype,
+            source,
+            mount_opts,
+            super_opts,
+        })
+    }
+
+    fn read_mountinfo(path: &Path) -> io::Result<Vec<MountInfo>> {
+        let txt = std::fs::read_to_string(path)?;
+        let mut out = Vec::new();
+        for line in txt.lines() {
+            if let Some(mi) = Self::parse_mountinfo_line(line) {
+                out.push(mi);
+            }
+        }
+        Ok(out)
+    }
+
+    fn snapshot_for_watched(&self, all: &[MountInfo]) -> HashMap<PathBuf, MountInfo> {
+        let mut map = HashMap::new();
+        for mi in all {
+            // watch by mount_point
+            if self.watched.contains(&mi.mount_point) {
+                map.insert(mi.mount_point.clone(), mi.clone());
+            }
+        }
+        map
+    }
+
+    fn materially_diff(a: &MountInfo, b: &MountInfo) -> bool {
+        // decide what counts as "Changed"
+        a.mount_id != b.mount_id
+            || a.parent_id != b.parent_id
+            || a.root != b.root
+            || a.fstype != b.fstype
+            || a.source != b.source
+            || a.mount_opts != b.mount_opts
+            || a.super_opts != b.super_opts
+    }
+
+    pub async fn run(mut self) -> io::Result<()> {
+        if self.watched.is_empty() {
+            return Ok(());
+        }
+
+        // prime snapshot
+        let all = Self::read_mountinfo(&self.config.mountinfo_path)?;
+        self.last = self.snapshot_for_watched(&all);
+        self.is_primed = true;
+
+        let mut ticker = time::interval(self.config.pulse);
+
+        loop {
+            ticker.tick().await;
+
+            let all = match Self::read_mountinfo(&self.config.mountinfo_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("xmount: failed to read mountinfo: {e}");
+                    continue;
+                }
+            };
+
+            let now = self.snapshot_for_watched(&all);
+
+            // Mounted / Changed
+            for (mp, new_info) in &now {
+                match self.last.get(mp) {
+                    None => {
+                        if self.is_primed {
+                            self.fire(XMountEvent::Mounted {
+                                target: mp.clone(),
+                                info: new_info.clone(),
+                            })
+                            .await;
+                        }
+                    }
+                    Some(old_info) => {
+                        if Self::materially_diff(old_info, new_info) {
+                            self.fire(XMountEvent::Changed {
+                                target: mp.clone(),
+                                old: old_info.clone(),
+                                new: new_info.clone(),
+                            })
+                            .await;
+                        }
+                    }
+                }
+            }
+
+            // Unmounted
+            for (mp, old_info) in &self.last {
+                if !now.contains_key(mp) {
+                    self.fire(XMountEvent::Unmounted {
+                        target: mp.clone(),
+                        last: old_info.clone(),
+                    })
+                    .await;
+                }
+            }
+
+            self.last = now;
+        }
+    }
+}
