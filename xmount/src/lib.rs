@@ -1,11 +1,10 @@
 pub mod events;
-
-use crate::events::{CallbackResult, MountInfo, XMountCallback, XMountEvent};
+use crate::events::{MountInfo, XMountEvent};
+use omnitrace_core::callbacks::CallbackResult;
 use std::{
     collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 use tokio::{sync::mpsc, time};
@@ -48,8 +47,7 @@ pub struct XMount {
     watched: HashSet<PathBuf>,
     config: XMountConfig,
 
-    callbacks: Vec<Arc<dyn XMountCallback>>,
-    results_tx: Option<mpsc::Sender<CallbackResult>>,
+    hub: omnitrace_core::callbacks::CallbackHub<XMountEvent>,
 
     // last known per watched mountpoint
     last: HashMap<PathBuf, MountInfo>,
@@ -71,8 +69,7 @@ impl XMount {
         Self {
             watched: HashSet::new(),
             config,
-            callbacks: Vec::new(),
-            results_tx: None,
+            hub: omnitrace_core::callbacks::CallbackHub::new(),
             last: HashMap::new(),
             is_primed: false,
         }
@@ -116,27 +113,23 @@ impl XMount {
     /// Add a callback to be called when mount events occur.
     /// Callbacks are called in the order they are added.
     /// If a callback returns a result, it will be sent to the callback channel if one is set.
-    pub fn add_callback<C: XMountCallback>(&mut self, cb: C) {
-        self.callbacks.push(Arc::new(cb));
+    pub fn add_callback<C>(&mut self, cb: C)
+    where
+        C: omnitrace_core::callbacks::Callback<XMountEvent> + 'static,
+    {
+        self.hub.add(cb);
     }
 
     /// Set the channel to send callback results to.
     /// If a callback returns a result, it will be sent to this channel.
     pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
-        self.results_tx = Some(tx);
+        self.hub.set_result_channel(tx);
     }
 
     /// Check if an event matches the callback's mask.
     /// For example, if the callback's mask is MOUNTED | UNMOUNTED, it will match Mounted and Unmounted events but not Changed events.
     async fn fire(&self, ev: XMountEvent) {
-        for cb in &self.callbacks {
-            if cb.mask().matches(&ev)
-                && let Some(r) = cb.call(&ev).await
-                && let Some(tx) = &self.results_tx
-            {
-                let _ = tx.send(r).await;
-            }
-        }
+        self.hub.fire(ev.mask().bits(), &ev).await;
     }
 
     /// Linux mountinfo escapes spaces as \040 etc.
