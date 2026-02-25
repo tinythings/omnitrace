@@ -17,3 +17,6 @@ devel:
 build:
 	cargo build --release --workspace
 	$(call move_bin,release,)
+
+test:
+	cargo nextest run --workspace
