@@ -1,0 +1,36 @@
+[package]
+name = "omnitrace-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+tokio.workspace = true
+async-trait.workspace = true
+bitflags.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+libc.workspace = true
+
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "filescream",
+    "procdog",
+    "xmount"
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+bitflags = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+libc = "0.2"
