@@ -1,7 +1,7 @@
-use crate::events::{CallbackResult, FileScreamCallback, FileScreamEvent};
 use blake3::{Hash, Hasher};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hashbrown::HashMap;
+use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
 use std::{
     collections::HashSet,
     fs::{Metadata, read_dir},
@@ -10,6 +10,8 @@ use std::{
     time::UNIX_EPOCH,
 };
 use tokio::{sync::mpsc, task::spawn_blocking, time::Duration};
+
+use crate::events::FileScreamEvent;
 
 pub mod events;
 
@@ -58,8 +60,7 @@ pub struct FileScream {
     fstate: HashMap<PathBuf, Hash>,
     dstate: HashMap<PathBuf, DirStamp>,
     config: FileScreamConfig,
-    callbacks: Vec<Arc<dyn FileScreamCallback>>,
-    results_tx: Option<mpsc::Sender<CallbackResult>>,
+    hub: CallbackHub<FileScreamEvent>,
 
     is_primed: bool,
     im: PathGlobMatcher,
@@ -82,8 +83,7 @@ impl FileScream {
             config: config.unwrap_or_default(),
             is_primed: false,
             im: PathGlobMatcher::default(),
-            callbacks: Vec::new(),
-            results_tx: None,
+            hub: CallbackHub::new(),
         }
     }
 
@@ -117,13 +117,16 @@ impl FileScream {
     }
 
     /// Add a callback to be invoked on file events.
-    pub fn add_callback<C: FileScreamCallback>(&mut self, cb: C) {
-        self.callbacks.push(Arc::new(cb));
+    pub fn add_callback<C>(&mut self, cb: C)
+    where
+        C: Callback<FileScreamEvent> + 'static,
+    {
+        self.hub.add(cb);
     }
 
     /// Set a channel to receive callback results. Results are JSON values returned by callbacks that matched an event.
-    pub fn set_callback_channel(&mut self, tx: tokio::sync::mpsc::Sender<events::CallbackResult>) {
-        self.results_tx = Some(tx);
+    pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
+        self.hub.set_result_channel(tx);
     }
 
     fn mtime_ns(meta: &Metadata) -> u128 {
@@ -131,14 +134,7 @@ impl FileScream {
     }
 
     async fn fire(&self, ev: FileScreamEvent) {
-        for cb in &self.callbacks {
-            if cb.mask().matches(&ev)
-                && let Some(r) = cb.call(&ev).await
-                && let Some(tx) = &self.results_tx
-            {
-                let _ = tx.send(r).await;
-            }
-        }
+        self.hub.fire(ev.mask().bits(), &ev).await;
     }
 
     /// Compile glob patterns into matchers for efficient scanning.

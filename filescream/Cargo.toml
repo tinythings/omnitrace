@@ -12,6 +12,8 @@ ignore = "0.4.25"
 serde = "1.0.228"
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["full"] }
+omnitrace-core = { path = ".." }
+async-trait.workspace = true
 
 [lib]
 name = "filescream"
