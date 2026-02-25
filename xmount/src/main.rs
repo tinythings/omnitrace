@@ -3,7 +3,6 @@ use omnitrace_core::callbacks::{Callback, CallbackResult};
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc::channel;
-
 use xmount::events::{XMountEvent, XMountMask};
 use xmount::{XMount, XMountConfig};
 
@@ -28,10 +27,7 @@ impl Callback<XMountEvent> for JsonCb {
                 }))
             }
             XMountEvent::Unmounted { target, last } => {
-                println!(
-                    "UNMOUNTED: {:?} (was {} {})",
-                    target, last.source, last.fstype
-                );
+                println!("UNMOUNTED: {:?} (was {} {})", target, last.source, last.fstype);
                 Some(json!({
                     "event": "unmounted",
                     "target": target.to_string_lossy().to_string(),
@@ -40,10 +36,7 @@ impl Callback<XMountEvent> for JsonCb {
                 }))
             }
             XMountEvent::Changed { target, old, new } => {
-                println!(
-                    "CHANGED: {:?} {}:{} -> {}:{}",
-                    target, old.source, old.fstype, new.source, new.fstype
-                );
+                println!("CHANGED: {:?} {}:{} -> {}:{}", target, old.source, old.fstype, new.source, new.fstype);
                 Some(json!({
                     "event": "changed",
                     "target": target.to_string_lossy().to_string(),
