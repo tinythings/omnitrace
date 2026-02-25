@@ -15,12 +15,11 @@ impl ProcBackend for PsBackend {
         let mut result = Vec::new();
 
         for line in stdout.lines().skip(1) {
-            let mut parts = line.trim().split_whitespace();
-            if let (Some(pid), Some(name)) = (parts.next(), parts.next()) {
-                if let Ok(pid) = pid.parse::<i32>() {
+            let mut parts = line.split_whitespace();
+            if let (Some(pid), Some(name)) = (parts.next(), parts.next())
+                && let Ok(pid) = pid.parse::<i32>() {
                     result.push((pid, name.to_string()));
                 }
-            }
         }
 
         Ok(result)

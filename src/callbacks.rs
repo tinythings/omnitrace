@@ -46,11 +46,10 @@ impl<E> CallbackHub<E> {
             if (cb.mask() & ev_mask) == 0 {
                 continue;
             }
-            if let Some(r) = cb.call(ev).await {
-                if let Some(tx) = &self.results_tx {
+            if let Some(r) = cb.call(ev).await
+                && let Some(tx) = &self.results_tx {
                     let _ = tx.send(r).await;
                 }
-            }
         }
     }
 }
