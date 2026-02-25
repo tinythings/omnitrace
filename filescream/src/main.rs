@@ -1,47 +1,47 @@
-use filescream::events::{Callback, EventMask, FileScreamEvent};
-use filescream::{FileScream, FileScreamConfig};
+use async_trait::async_trait;
+use omnitrace_core::callbacks::{Callback, CallbackResult};
 use std::time::Duration;
 use tokio::sync::mpsc::channel;
+
+use filescream::events::{FileScreamEvent, FileScreamMask};
+use filescream::{FileScream, FileScreamConfig};
+
+struct PrintCb;
+
+#[async_trait]
+impl Callback<FileScreamEvent> for PrintCb {
+    fn mask(&self) -> u64 {
+        (FileScreamMask::CREATED | FileScreamMask::CHANGED | FileScreamMask::REMOVED).bits()
+    }
+
+    async fn call(&self, ev: &FileScreamEvent) -> Option<CallbackResult> {
+        println!("EVENT: {:?}", ev);
+        None
+    }
+}
 
 #[tokio::main]
 async fn main() {
     let mut fs = FileScream::new(Some(FileScreamConfig::default().pulse(Duration::from_secs(1))));
 
     fs.watch("/tmp");
-    fs.ignore("in*r/"); // E.g. ignore /tmp/inner/foo.txt but not /tmp/inner.txt
+    fs.ignore("in*r/"); // example ignore
 
-    // Callback: react to CREATED + REMOVED, print and return JSON
-    let cb = Callback::new(EventMask::CREATED | EventMask::REMOVED).on(|ev| async move {
-        match ev {
-            FileScreamEvent::Created { path } => {
-                println!("File has been created: {:?}", path);
-                Some(serde_json::json!({ "event": "created", "path": path.to_string_lossy() }))
-            }
-            FileScreamEvent::Removed { path } => {
-                println!("File has been removed: {:?}", path);
-                Some(serde_json::json!({ "event": "removed", "path": path.to_string_lossy() }))
-            }
-            _ => None,
-        }
-    });
-    fs.add_callback(cb);
+    fs.add_callback(PrintCb);
 
-    // Setup a channel to receive callback results (optional)
-    // and spawn a task to print them
-    let (tx, mut rx) = channel::<serde_json::Value>(0xfff);
+    let (tx, mut rx) = channel::<CallbackResult>(0xfff);
     fs.set_callback_channel(tx);
+
     tokio::spawn(async move {
         while let Some(r) = rx.recv().await {
-            println!("RESULT: {}", r);
+            println!("RESULT: {r}");
         }
     });
 
-    // Start the file watcher (runs indefinitely)
     tokio::spawn(fs.run());
 
-    // emulate your app doing other work
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        println!("App is doing other work...");
+        println!("App is doing other work... (pretending to be useful)");
     }
 }
