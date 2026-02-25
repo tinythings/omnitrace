@@ -218,9 +218,10 @@ impl NetNotify {
 
         let now = Instant::now();
         if let Some((name, exp)) = self.dns_cache.get(&ip)
-            && *exp > now {
-                return Some(name.clone());
-            }
+            && *exp > now
+        {
+            return Some(name.clone());
+        }
 
         let name = reverse_dns(ip)?;
         self.dns_cache.insert(ip, (name.clone(), now + self.cfg.dns_ttl));
@@ -244,11 +245,39 @@ impl NetNotify {
     }
 
     fn matches(&self, c: &ConnKey) -> bool {
+        // ----- decode/normalize -----
+        let local = c.local_dec.as_deref().unwrap_or(&c.local);
+        let remote = c.remote_dec.as_deref().unwrap_or(&c.remote);
+
+        // normalize proto so "udp * *" matches udp6 too
+        let proto = c.proto.strip_suffix('6').unwrap_or(&c.proto);
+
+        // DSL-friendly target: "<proto> <local> <remote>"
+        let simple = format!("{} {} {}", proto, local, remote);
+
+        // Precompute remote ip/host for the typed matchers
         let remote_dec = c.remote_dec.as_deref().unwrap_or("-");
         let remote_ip = remote_dec.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(remote_dec);
+
         let remote_host = c.remote_host.as_deref().unwrap_or("");
 
-        // WATCH: hostname rules (requires DNS)
+        // generic ignore (DSL: "udp * *", "tcp * 1.2.3.4:*", etc)
+        if self.ignore.iter().any(|p| p.matches(&simple)) {
+            return false;
+        }
+
+        if !remote_host.is_empty() && self.ignore_host.iter().any(|p| p.matches(remote_host)) {
+            return false;
+        }
+        if self.ignore_ip.iter().any(|p| p.matches(remote_ip)) {
+            return false;
+        }
+
+        if !self.watch.is_empty() && !self.watch.iter().any(|p| p.matches(&simple)) {
+            return false;
+        }
+
+        // Host watch: if configured, require DNS and require a host match
         if !self.watch_host.is_empty() {
             if remote_host.is_empty() {
                 return false;
@@ -258,38 +287,30 @@ impl NetNotify {
             }
         }
 
-        // WATCH: ip rules
-        if !self.watch_ip.is_empty()
-            && !self.watch_ip.iter().any(|p| p.matches(remote_ip)) {
+        // IP watch: if configured, require match
+        if !self.watch_ip.is_empty() && !self.watch_ip.iter().any(|p| p.matches(remote_ip)) {
+            return false;
+        }
+
+        if !self.watch.is_empty() || !self.ignore.is_empty() {
+            let target = format!(
+                "{} raw:{}->{} dec:{}->{} state:{}:{}",
+                proto,
+                c.local,
+                c.remote,
+                c.local_dec.as_deref().unwrap_or("-"),
+                c.remote_dec.as_deref().unwrap_or("-"),
+                c.state.as_deref().unwrap_or("-"),
+                c.state_dec.as_deref().unwrap_or("-"),
+            );
+
+            if !self.watch.is_empty() && !self.watch.iter().any(|p| p.matches(&target)) {
                 return false;
             }
 
-        // IGNORE: hostname
-        if !remote_host.is_empty() && self.ignore_host.iter().any(|p| p.matches(remote_host)) {
-            return false;
-        }
-
-        // IGNORE: ip
-        if self.ignore_ip.iter().any(|p| p.matches(remote_ip)) {
-            return false;
-        }
-
-        // fallback to your existing “target string” matching
-        let target = format!(
-            "{} raw:{}->{} dec:{}->{} state:{}:{}",
-            c.proto,
-            c.local,
-            c.remote,
-            c.local_dec.as_deref().unwrap_or("-"),
-            c.remote_dec.as_deref().unwrap_or("-"),
-            c.state.as_deref().unwrap_or("-"),
-            c.state_dec.as_deref().unwrap_or("-"),
-        );
-        if !self.watch.is_empty() && !self.watch.iter().any(|p| p.matches(&target)) {
-            return false;
-        }
-        if self.ignore.iter().any(|p| p.matches(&target)) {
-            return false;
+            if self.ignore.iter().any(|p| p.matches(&target)) {
+                return false;
+            }
         }
 
         true
