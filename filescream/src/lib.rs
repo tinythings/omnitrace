@@ -1,12 +1,15 @@
 use blake3::{Hash, Hasher};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hashbrown::HashMap;
-use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
+use omnitrace_core::{
+    callbacks::{Callback, CallbackHub, CallbackResult},
+    sensor::{Sensor, SensorCtx},
+};
 use std::{
     collections::HashSet,
     fs::{Metadata, read_dir},
     path::{Path, PathBuf},
-    sync::Arc,
+    pin::Pin,
     time::UNIX_EPOCH,
 };
 use tokio::{sync::mpsc, task::spawn_blocking, time::Duration};
@@ -60,7 +63,6 @@ pub struct FileScream {
     fstate: HashMap<PathBuf, Hash>,
     dstate: HashMap<PathBuf, DirStamp>,
     config: FileScreamConfig,
-    hub: CallbackHub<FileScreamEvent>,
 
     is_primed: bool,
     im: PathGlobMatcher,
@@ -83,7 +85,6 @@ impl FileScream {
             config: config.unwrap_or_default(),
             is_primed: false,
             im: PathGlobMatcher::default(),
-            hub: CallbackHub::new(),
         }
     }
 
@@ -116,25 +117,12 @@ impl FileScream {
         self.im = self.get_glob_matchers(&self.ignored);
     }
 
-    /// Add a callback to be invoked on file events.
-    pub fn add_callback<C>(&mut self, cb: C)
-    where
-        C: Callback<FileScreamEvent> + 'static,
-    {
-        self.hub.add(cb);
-    }
-
-    /// Set a channel to receive callback results. Results are JSON values returned by callbacks that matched an event.
-    pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
-        self.hub.set_result_channel(tx);
-    }
-
     fn mtime_ns(meta: &Metadata) -> u128 {
         meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
     }
 
-    async fn fire(&self, ev: FileScreamEvent) {
-        self.hub.fire(ev.mask().bits(), &ev).await;
+    async fn fire(hub: &CallbackHub<FileScreamEvent>, ev: FileScreamEvent) {
+        hub.fire(ev.mask().bits(), &ev).await;
     }
 
     /// Compile glob patterns into matchers for efficient scanning.
@@ -231,7 +219,7 @@ impl FileScream {
         .expect("scan task panicked")
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self, ctx: SensorCtx<FileScreamEvent>) {
         let (files, dirs) = self.scan_blocking().await;
         self.fstate = files;
         self.dstate = dirs;
@@ -240,7 +228,10 @@ impl FileScream {
         let mut ticker = tokio::time::interval(self.config.get_pulse());
 
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
 
             let (new_files, new_dir_state) = self.scan_blocking().await;
             self.dstate = new_dir_state;
@@ -251,17 +242,27 @@ impl FileScream {
                     Some(old_hash) if old_hash != new_hash => Some(FileScreamEvent::Changed { path: path.clone() }),
                     _ => None,
                 } {
-                    self.fire(ev).await;
+                    Self::fire(&ctx.hub, ev).await;
                 }
             }
 
             for path in self.fstate.keys() {
                 if !new_files.contains_key(path) {
-                    self.fire(FileScreamEvent::Removed { path: path.clone() }).await;
+                    Self::fire(&ctx.hub, FileScreamEvent::Removed { path: path.clone() }).await;
                 }
             }
 
             self.fstate = new_files;
         }
+    }
+}
+
+impl Sensor for FileScream {
+    type Event = FileScreamEvent;
+
+    fn run(self, ctx: SensorCtx<Self::Event>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            FileScream::run(self, ctx).await;
+        })
     }
 }

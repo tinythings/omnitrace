@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use omnitrace_core::callbacks::{Callback, CallbackResult};
-use std::time::Duration;
-use tokio::sync::mpsc::channel;
-
 use filescream::events::{FileScreamEvent, FileScreamMask};
 use filescream::{FileScream, FileScreamConfig};
+use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
+use omnitrace_core::sensor::spawn_sensor;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::mpsc::channel;
 
 struct PrintCb;
 
@@ -22,26 +22,34 @@ impl Callback<FileScreamEvent> for PrintCb {
 
 #[tokio::main]
 async fn main() {
-    let mut fs = FileScream::new(Some(FileScreamConfig::default().pulse(Duration::from_secs(1))));
-
-    fs.watch("/tmp");
-    fs.ignore("in*r/"); // example ignore
-
-    fs.add_callback(PrintCb);
-
     let (tx, mut rx) = channel::<CallbackResult>(0xfff);
-    fs.set_callback_channel(tx);
 
-    tokio::spawn(async move {
+    let mut hub = CallbackHub::<FileScreamEvent>::new();
+    hub.add(PrintCb);
+    hub.set_result_channel(tx);
+    let hub = Arc::new(hub);
+
+    let mut fs = FileScream::new(Some(FileScreamConfig::default().pulse(Duration::from_secs(1))));
+    fs.watch("/tmp");
+    fs.ignore("in*r/");
+
+    let rx_task = tokio::spawn(async move {
         while let Some(r) = rx.recv().await {
             println!("RESULT: {r}");
         }
     });
 
-    tokio::spawn(fs.run());
+    let (handle, mut sensor_task) = spawn_sensor(fs, hub.clone());
 
-    loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        println!("App is doing other work... (pretending to be useful)");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("Shutting down on Ctrl-C...");
+            handle.shutdown()
+        },
+        _ = &mut sensor_task => {}
     }
+
+    let _ = sensor_task.await;
+    rx_task.abort();
+    let _ = rx_task.await;
 }
