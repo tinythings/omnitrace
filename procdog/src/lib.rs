@@ -1,7 +1,8 @@
 pub mod backends;
 pub mod events;
 
-use crate::events::{CallbackResult, ProcDogCallback, ProcDogEvent};
+use crate::events::ProcDogEvent;
+use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -21,10 +22,7 @@ pub struct ProcDogConfig {
 
 impl Default for ProcDogConfig {
     fn default() -> Self {
-        Self {
-            interval: Duration::from_secs(1),
-            emit_missing_on_start: false,
-        }
+        Self { interval: Duration::from_secs(1), emit_missing_on_start: false }
     }
 }
 
@@ -52,8 +50,7 @@ pub struct ProcDog {
     state: HashMap<String, HashSet<i32>>,
 
     config: ProcDogConfig,
-    callbacks: Vec<Arc<dyn ProcDogCallback>>,
-    results_tx: Option<mpsc::Sender<CallbackResult>>,
+    hub: CallbackHub<ProcDogEvent>,
     backend: Arc<dyn ProcBackend>,
 }
 
@@ -64,8 +61,7 @@ impl ProcDog {
             ignored: HashSet::new(),
             state: HashMap::new(),
             config: cfg.unwrap_or_default(),
-            callbacks: Vec::new(),
-            results_tx: None,
+            hub: CallbackHub::new(),
             backend: Arc::new(backends::stps::PsBackend),
         }
     }
@@ -85,23 +81,19 @@ impl ProcDog {
         self.ignored.insert(pattern.into());
     }
 
-    pub fn add_callback<C: ProcDogCallback>(&mut self, cb: C) {
-        self.callbacks.push(Arc::new(cb));
+    pub fn add_callback<C>(&mut self, cb: C)
+    where
+        C: Callback<ProcDogEvent> + 'static,
+    {
+        self.hub.add(cb);
     }
 
     pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
-        self.results_tx = Some(tx);
+        self.hub.set_result_channel(tx);
     }
 
     async fn fire(&self, ev: ProcDogEvent) {
-        for cb in &self.callbacks {
-            if cb.mask().matches(&ev)
-                && let Some(r) = cb.call(&ev).await
-                && let Some(tx) = &self.results_tx
-            {
-                let _ = tx.send(r).await;
-            }
-        }
+        self.hub.fire(ev.mask().bits(), &ev).await;
     }
 
     async fn prime(&mut self) {
@@ -111,15 +103,10 @@ impl ProcDog {
                     continue;
                 }
 
-                let pids: HashSet<i32> = procs
-                    .iter()
-                    .filter(|(_, n)| n == name)
-                    .map(|(pid, _)| *pid)
-                    .collect();
+                let pids: HashSet<i32> = procs.iter().filter(|(_, n)| n == name).map(|(pid, _)| *pid).collect();
 
                 if self.config.emit_missing_on_start && pids.is_empty() {
-                    self.fire(ProcDogEvent::Missing { name: name.clone() })
-                        .await;
+                    self.fire(ProcDogEvent::Missing { name: name.clone() }).await;
                 }
 
                 self.state.insert(name.clone(), pids);
@@ -138,11 +125,7 @@ impl ProcDog {
                 continue;
             }
 
-            let current: HashSet<i32> = procs
-                .iter()
-                .filter(|(_, n)| n == name)
-                .map(|(pid, _)| *pid)
-                .collect();
+            let current: HashSet<i32> = procs.iter().filter(|(_, n)| n == name).map(|(pid, _)| *pid).collect();
 
             let previous = self.state.get(name).cloned().unwrap_or_default();
 
@@ -153,19 +136,11 @@ impl ProcDog {
 
             // Fire events
             for pid in &appeared {
-                self.fire(ProcDogEvent::Appeared {
-                    name: name.clone(),
-                    pid: *pid,
-                })
-                .await;
+                self.fire(ProcDogEvent::Appeared { name: name.clone(), pid: *pid }).await;
             }
 
             for pid in &disappeared {
-                self.fire(ProcDogEvent::Disappeared {
-                    name: name.clone(),
-                    pid: *pid,
-                })
-                .await;
+                self.fire(ProcDogEvent::Disappeared { name: name.clone(), pid: *pid }).await;
             }
 
             // Now update state
