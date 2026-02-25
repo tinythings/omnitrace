@@ -1,19 +1,31 @@
+use async_trait::async_trait;
+use omnitrace_core::callbacks::{Callback, CallbackResult};
 use procdog::{
     ProcDog, ProcDogConfig,
-    events::{Callback, EventMask},
+    events::{ProcDogEvent, ProcDogMask},
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+struct PrintCb;
+
+#[async_trait]
+impl Callback<ProcDogEvent> for PrintCb {
+    fn mask(&self) -> u64 {
+        (ProcDogMask::APPEARED | ProcDogMask::MISSING | ProcDogMask::DISAPPEARED).bits()
+    }
+
+    async fn call(&self, ev: &ProcDogEvent) -> Option<CallbackResult> {
+        println!("EVENT: {:?}", ev);
+        None
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let mut dog = ProcDog::new(Some(
-        ProcDogConfig::default()
-            .interval(Duration::from_secs(1))
-            .emit_on_start(true),
-    ));
+    let mut dog = ProcDog::new(Some(ProcDogConfig::default().interval(Duration::from_secs(1)).emit_on_start(true)));
 
-    // Set a proper backend for your platform (optional, will auto-detect)
+    // Set a proper backend for your platform (optional)
     #[cfg(target_os = "linux")]
     dog.set_backend(procdog::backends::linuxps::LinuxPsBackend);
 
@@ -23,19 +35,11 @@ async fn main() {
     #[cfg(all(not(target_os = "linux"), not(target_os = "netbsd")))]
     dog.set_backend(procdog::backends::stps::PsBackend);
 
-    // Add processes to watch (you can add/remove at runtime)
-    dog.watch("perl"); // or any other different shell, or "python", etc.
+    dog.watch("perl");
 
-    let cb = Callback::new(EventMask::APPEARED | EventMask::MISSING | EventMask::DISAPPEARED).on(
-        |ev| async move {
-            println!("EVENT: {:?}", ev);
-            None
-        },
-    );
+    dog.add_callback(PrintCb);
 
-    dog.add_callback(cb);
-
-    let (tx, mut rx) = mpsc::channel(0xff);
+    let (tx, mut rx) = mpsc::channel::<CallbackResult>(0xff);
     dog.set_callback_channel(tx);
 
     tokio::spawn(async move {
@@ -44,10 +48,8 @@ async fn main() {
         }
     });
 
-    // Run sensor in background
     tokio::spawn(dog.run());
 
-    // Simulate your app doing other work
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         println!("App is doing other work...");
