@@ -1,6 +1,9 @@
 pub mod events;
 pub mod netutil;
 
+#[cfg(test)]
+mod netutil_ut;
+
 use crate::events::{ConnKey, NetNotifyEvent};
 use crate::netutil::{decode_tcp_state, is_hostish, is_ipish, reverse_dns};
 use glob::Pattern;
