@@ -1,10 +1,14 @@
 pub mod events;
 use crate::events::{MountInfo, XMountEvent};
-use omnitrace_core::callbacks::CallbackResult;
+use omnitrace_core::{
+    callbacks::CallbackResult,
+    sensor::{Sensor, SensorCtx},
+};
 use std::{
     collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
+    pin::Pin,
     time::Duration,
 };
 use tokio::{sync::mpsc, time};
@@ -23,10 +27,7 @@ pub struct XMountConfig {
 /// Main struct for monitoring mount events.
 impl Default for XMountConfig {
     fn default() -> Self {
-        Self {
-            pulse: Duration::from_secs(1),
-            mountinfo_path: PathBuf::from("/proc/self/mountinfo"),
-        }
+        Self { pulse: Duration::from_secs(1), mountinfo_path: PathBuf::from("/proc/self/mountinfo") }
     }
 }
 
@@ -47,8 +48,6 @@ pub struct XMount {
     watched: HashSet<PathBuf>,
     config: XMountConfig,
 
-    hub: omnitrace_core::callbacks::CallbackHub<XMountEvent>,
-
     // last known per watched mountpoint
     last: HashMap<PathBuf, MountInfo>,
     is_primed: bool,
@@ -66,13 +65,7 @@ impl XMount {
     /// The configuration controls the polling interval and the path to the mountinfo file to read.
     /// The default configuration polls every 1 second and reads from /proc/self/mountinfo, which is usually what you want.
     pub fn new(config: XMountConfig) -> Self {
-        Self {
-            watched: HashSet::new(),
-            config,
-            hub: omnitrace_core::callbacks::CallbackHub::new(),
-            last: HashMap::new(),
-            is_primed: false,
-        }
+        Self { watched: HashSet::new(), config, last: HashMap::new(), is_primed: false }
     }
 
     /// Add a mountpoint (target) to watch.
@@ -110,26 +103,10 @@ impl XMount {
         }
     }
 
-    /// Add a callback to be called when mount events occur.
-    /// Callbacks are called in the order they are added.
-    /// If a callback returns a result, it will be sent to the callback channel if one is set.
-    pub fn add_callback<C>(&mut self, cb: C)
-    where
-        C: omnitrace_core::callbacks::Callback<XMountEvent> + 'static,
-    {
-        self.hub.add(cb);
-    }
-
-    /// Set the channel to send callback results to.
-    /// If a callback returns a result, it will be sent to this channel.
-    pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
-        self.hub.set_result_channel(tx);
-    }
-
     /// Check if an event matches the callback's mask.
     /// For example, if the callback's mask is MOUNTED | UNMOUNTED, it will match Mounted and Unmounted events but not Changed events.
-    async fn fire(&self, ev: XMountEvent) {
-        self.hub.fire(ev.mask().bits(), &ev).await;
+    async fn fire(hub: &omnitrace_core::callbacks::CallbackHub<XMountEvent>, ev: XMountEvent) {
+        hub.fire(ev.mask().bits(), &ev).await;
     }
 
     /// Linux mountinfo escapes spaces as \040 etc.
@@ -144,8 +121,7 @@ impl XMount {
                 let b = bytes[i + 2];
                 let c = bytes[i + 3];
                 if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() {
-                    let oct =
-                        ((a - b'0') as u32) * 64 + ((b - b'0') as u32) * 8 + ((c - b'0') as u32);
+                    let oct = ((a - b'0') as u32) * 64 + ((b - b'0') as u32) * 8 + ((c - b'0') as u32);
                     if let Some(ch) = char::from_u32(oct) {
                         out.push(ch);
                         i += 4;
@@ -241,7 +217,7 @@ impl XMount {
         }
     }
 
-    pub async fn run(mut self) -> io::Result<()> {
+    pub async fn run(mut self, ctx: SensorCtx<XMountEvent>) -> io::Result<()> {
         if self.watched.is_empty() {
             return Ok(());
         }
@@ -254,7 +230,10 @@ impl XMount {
         let mut ticker = time::interval(self.config.pulse);
 
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => break Ok(()),
+                _ = ticker.tick() => {}
+            }
 
             let all = match Self::read_mountinfo(&self.config.mountinfo_path) {
                 Ok(v) => v,
@@ -271,21 +250,12 @@ impl XMount {
                 match self.last.get(mp) {
                     None => {
                         if self.is_primed {
-                            self.fire(XMountEvent::Mounted {
-                                target: mp.clone(),
-                                info: new_info.clone(),
-                            })
-                            .await;
+                            Self::fire(&ctx.hub, XMountEvent::Mounted { target: mp.clone(), info: new_info.clone() }).await;
                         }
                     }
                     Some(old_info) => {
                         if Self::materially_diff(old_info, new_info) {
-                            self.fire(XMountEvent::Changed {
-                                target: mp.clone(),
-                                old: old_info.clone(),
-                                new: new_info.clone(),
-                            })
-                            .await;
+                            Self::fire(&ctx.hub, XMountEvent::Changed { target: mp.clone(), old: old_info.clone(), new: new_info.clone() }).await;
                         }
                     }
                 }
@@ -294,16 +264,24 @@ impl XMount {
             // Unmounted
             for (mp, old_info) in &self.last {
                 if !now.contains_key(mp) {
-                    self.fire(XMountEvent::Unmounted {
-                        target: mp.clone(),
-                        last: old_info.clone(),
-                    })
-                    .await;
+                    Self::fire(&ctx.hub, XMountEvent::Unmounted { target: mp.clone(), last: old_info.clone() }).await;
                 }
             }
 
             self.last = now;
         }
+    }
+}
+
+impl Sensor for XMount {
+    type Event = XMountEvent;
+
+    fn run(self, ctx: SensorCtx<Self::Event>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            if let Err(e) = XMount::run(self, ctx).await {
+                log::error!("xmount: sensors stopped: {e}");
+            }
+        })
     }
 }
 

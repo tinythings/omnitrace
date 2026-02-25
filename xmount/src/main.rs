@@ -1,6 +1,8 @@
 use async_trait::async_trait;
-use omnitrace_core::callbacks::{Callback, CallbackResult};
+use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
+use omnitrace_core::sensor::spawn_sensor;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::channel;
 use xmount::events::{XMountEvent, XMountMask};
@@ -51,34 +53,34 @@ impl Callback<XMountEvent> for JsonCb {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut x = XMount::new(XMountConfig::default().pulse(Duration::from_millis(500)));
-
-    // Put real mount targets here
     x.add("/mnt/your-usb-drive");
     x.add("/media/somedisk");
 
-    // Callback
-    x.add_callback(JsonCb);
-
-    // Callback results channel (prints returned JSON)
     let (tx, mut rx) = channel::<CallbackResult>(0xfff);
-    x.set_callback_channel(tx);
 
-    tokio::spawn(async move {
+    let mut hub = CallbackHub::<XMountEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+    let hub = Arc::new(hub);
+
+    let rx_task = tokio::spawn(async move {
         while let Some(r) = rx.recv().await {
             println!("RESULT: {r}");
         }
     });
 
-    // Run watcher (forever)
-    tokio::spawn(async move {
-        if let Err(e) = x.run().await {
-            eprintln!("xmount failed: {e}");
-        }
-    });
+    let (handle, mut sensor_task) = spawn_sensor(x, hub.clone());
 
-    // Pretend we're a real application
-    loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        println!("App is doing other work... (pretending to be useful)");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nShutting down on Ctrl-C...");
+            handle.shutdown()
+        },
+        _ = &mut sensor_task => {}
     }
+
+    let _ = sensor_task.await;
+    rx_task.abort();
+    let _ = rx_task.await;
+    Ok(())
 }
