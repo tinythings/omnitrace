@@ -4,7 +4,7 @@ pub(crate) fn hex_port(s: &str) -> Option<u16> {
 
 pub(crate) fn dec_ipv4(hex_le: &str) -> Option<std::net::Ipv4Addr> {
     let v = u32::from_str_radix(hex_le, 16).ok()?;
-    Some(std::net::Ipv4Addr::from(u32::from_le(v)))
+    Some(std::net::Ipv4Addr::from(u32::swap_bytes(v)))
 }
 
 pub(crate) fn dec_ipv6(hex_be: &str) -> Option<std::net::Ipv6Addr> {
@@ -141,11 +141,27 @@ pub(crate) fn expand_pat(pat: &str) -> String {
 }
 
 pub(crate) fn is_ipish(p: &str) -> bool {
-    // allow digits, '.', ':', '*'
-    !p.is_empty() && p.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':' || c == '*')
+    let p = p.trim();
+    if p.split_whitespace().count() != 1 {
+        return false;
+    }
+
+    // allow digits, '.', ':', '*', and hex letters for IPv6
+    !p.is_empty()
+        && p.chars().all(|c|
+            c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '*'
+        )
+        // still require it looks like an IP (avoid treating "deadbeef" as ip)
+        && (p.contains('.') || p.contains(':'))
 }
 
 pub(crate) fn is_hostish(p: &str) -> bool {
+    let p = p.trim();
+    // multi-token patterns like "udp * *" are NOT host-ish
+    if p.split_whitespace().count() != 1 {
+        return false;
+    }
+
     // any letter => host
     p.chars().any(|c| c.is_ascii_alphabetic())
         // or has '*' and '.' (typical glob domain)
