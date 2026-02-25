@@ -62,7 +62,7 @@ async fn main() {
     //sensor.add("*.google.com");
     //sensor.add("8.8.8.8"); // IP-only filter example
     sensor.add("*"); // if you hate yourself
-    // sensor.ignore("udp * *");    // optional noise filter
+    // sensor.ignore("udp * *"); // optional noise filter
 
     let (tx, mut rx) = channel::<CallbackResult>(0xfff);
 
