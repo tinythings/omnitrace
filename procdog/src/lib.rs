@@ -2,13 +2,17 @@ pub mod backends;
 pub mod events;
 
 use crate::events::ProcDogEvent;
-use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
+use omnitrace_core::{
+    callbacks::CallbackHub,
+    sensor::{Sensor, SensorCtx},
+};
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::mpsc;
 
 #[async_trait::async_trait]
 pub trait ProcBackend: Send + Sync {
@@ -50,7 +54,6 @@ pub struct ProcDog {
     state: HashMap<String, HashSet<i32>>,
 
     config: ProcDogConfig,
-    hub: CallbackHub<ProcDogEvent>,
     backend: Arc<dyn ProcBackend>,
 }
 
@@ -61,7 +64,6 @@ impl ProcDog {
             ignored: HashSet::new(),
             state: HashMap::new(),
             config: cfg.unwrap_or_default(),
-            hub: CallbackHub::new(),
             backend: Arc::new(backends::stps::PsBackend),
         }
     }
@@ -81,22 +83,11 @@ impl ProcDog {
         self.ignored.insert(pattern.into());
     }
 
-    pub fn add_callback<C>(&mut self, cb: C)
-    where
-        C: Callback<ProcDogEvent> + 'static,
-    {
-        self.hub.add(cb);
+    async fn fire(hub: &CallbackHub<ProcDogEvent>, ev: ProcDogEvent) {
+        hub.fire(ev.mask().bits(), &ev).await;
     }
 
-    pub fn set_callback_channel(&mut self, tx: mpsc::Sender<CallbackResult>) {
-        self.hub.set_result_channel(tx);
-    }
-
-    async fn fire(&self, ev: ProcDogEvent) {
-        self.hub.fire(ev.mask().bits(), &ev).await;
-    }
-
-    async fn prime(&mut self) {
+    async fn prime(&mut self, hub: &CallbackHub<ProcDogEvent>) {
         if let Ok(procs) = self.backend.list().await {
             for name in &self.watched {
                 if self.ignored.contains(name) {
@@ -106,7 +97,7 @@ impl ProcDog {
                 let pids: HashSet<i32> = procs.iter().filter(|(_, n)| n == name).map(|(pid, _)| *pid).collect();
 
                 if self.config.emit_missing_on_start && pids.is_empty() {
-                    self.fire(ProcDogEvent::Missing { name: name.clone() }).await;
+                    Self::fire(hub, ProcDogEvent::Missing { name: name.clone() }).await;
                 }
 
                 self.state.insert(name.clone(), pids);
@@ -114,7 +105,7 @@ impl ProcDog {
         }
     }
 
-    async fn tick_once(&mut self) {
+    async fn tick_once(&mut self, hub: &CallbackHub<ProcDogEvent>) {
         let procs = match self.backend.list().await {
             Ok(p) => p,
             Err(_) => return,
@@ -136,11 +127,11 @@ impl ProcDog {
 
             // Fire events
             for pid in &appeared {
-                self.fire(ProcDogEvent::Appeared { name: name.clone(), pid: *pid }).await;
+                Self::fire(hub, ProcDogEvent::Appeared { name: name.clone(), pid: *pid }).await;
             }
 
             for pid in &disappeared {
-                self.fire(ProcDogEvent::Disappeared { name: name.clone(), pid: *pid }).await;
+                Self::fire(hub, ProcDogEvent::Disappeared { name: name.clone(), pid: *pid }).await;
             }
 
             // Now update state
@@ -148,14 +139,29 @@ impl ProcDog {
         }
     }
 
-    pub async fn run(mut self) {
-        self.prime().await;
+    pub async fn run(mut self, ctx: SensorCtx<ProcDogEvent>) {
+        self.prime(&ctx.hub).await;
 
         let mut ticker = tokio::time::interval(self.config.get_interval());
 
         loop {
-            ticker.tick().await;
-            self.tick_once().await;
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+
+            self.tick_once(&ctx.hub).await;
         }
+    }
+}
+
+/// Interface implementation
+impl Sensor for ProcDog {
+    type Event = ProcDogEvent;
+
+    fn run(self, ctx: SensorCtx<Self::Event>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            ProcDog::run(self, ctx).await;
+        })
     }
 }
