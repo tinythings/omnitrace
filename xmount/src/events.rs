@@ -1,7 +1,8 @@
 use bitflags::bitflags;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MountInfo {
     pub mount_id: u32,
     pub parent_id: u32,
@@ -13,21 +14,11 @@ pub struct MountInfo {
     pub super_opts: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum XMountEvent {
-    Mounted {
-        target: PathBuf,
-        info: MountInfo,
-    },
-    Unmounted {
-        target: PathBuf,
-        last: MountInfo,
-    },
-    Changed {
-        target: PathBuf,
-        old: MountInfo,
-        new: MountInfo,
-    },
+    Mounted { target: PathBuf, info: MountInfo },
+    Unmounted { target: PathBuf, last: MountInfo },
+    Changed { target: PathBuf, old: MountInfo, new: MountInfo },
 }
 
 bitflags! {
