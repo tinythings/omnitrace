@@ -1,9 +1,6 @@
 pub mod events;
 use crate::events::{MountInfo, XMountEvent};
-use omnitrace_core::{
-    callbacks::CallbackResult,
-    sensor::{Sensor, SensorCtx},
-};
+use omnitrace_core::sensor::{Sensor, SensorCtx};
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -11,7 +8,7 @@ use std::{
     pin::Pin,
     time::Duration,
 };
-use tokio::{sync::mpsc, time};
+use tokio::time;
 
 /// Configuration for the XMount monitor.
 ///

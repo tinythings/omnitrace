@@ -2,7 +2,7 @@ use blake3::{Hash, Hasher};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use hashbrown::HashMap;
 use omnitrace_core::{
-    callbacks::{Callback, CallbackHub, CallbackResult},
+    callbacks::CallbackHub,
     sensor::{Sensor, SensorCtx},
 };
 use std::{
@@ -12,7 +12,7 @@ use std::{
     pin::Pin,
     time::UNIX_EPOCH,
 };
-use tokio::{sync::mpsc, task::spawn_blocking, time::Duration};
+use tokio::{task::spawn_blocking, time::Duration};
 
 use crate::events::FileScreamEvent;
 
