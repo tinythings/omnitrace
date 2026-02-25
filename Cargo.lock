@@ -152,11 +152,13 @@ dependencies = [
 name = "filescream"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bitflags",
  "blake3",
  "globset",
  "hashbrown",
  "ignore",
+ "omnitrace-core",
  "serde",
  "serde_json",
  "tokio",
@@ -316,6 +318,7 @@ dependencies = [
  "async-trait",
  "bitflags",
  "libc",
+ "omnitrace-core",
  "serde",
  "serde_json",
  "tokio",
