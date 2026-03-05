@@ -29,6 +29,17 @@ Backend-based design:
 
 Emits lifecycle-style process events.
 
+### socktray
+Socket activity monitoring sensor.
+
+- Linux/Android: `/proc/net/*` snapshot diffing
+- NetBSD: `sysctl` PCB lists (libc)
+- FreeBSD: `kinfo_getfile()` via libutil/libc
+- Other targets: `netstat -an` fallback backend
+- Events:
+  - Opened
+  - Closed
+
 ### filescream
 Filesystem watcher.
 
@@ -68,6 +79,32 @@ Build a specific crate:
 cargo build -p <name>
 ```
 
+## Test From CLI (socktray)
+
+Run the sensor:
+
+```bash
+cargo run -p socktray
+```
+
+In another terminal, generate socket activity:
+
+Linux/Android:
+
+```bash
+curl -I https://example.com
+nc -vz 1.1.1.1 443
+```
+
+NetBSD/FreeBSD:
+
+```bash
+fetch -qo - https://example.com > /dev/null
+nc -vz 1.1.1.1 443
+```
+
+You should see `opened` / `closed` lines in the `socktray` terminal.
+
 ---
 
 ## Callback Model
@@ -100,6 +137,7 @@ Currently the main focus is Linux and NetBSD.
 |-------------|-------|--------|
 | xmount      | ✔     | ✔      |
 | procdog     | ✔     | ✔      |
+| socktray    | ✔     | ✔      |
 | filescream  | ✔     | (planned) |
 
 ---
