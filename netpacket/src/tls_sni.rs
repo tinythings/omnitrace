@@ -17,13 +17,16 @@ use pnet::{
     },
 };
 
-type SniKey = (IpAddr, u16, IpAddr, u16);
-type SniVal = (String, Instant);
+pub type SniKey = (IpAddr, u16, IpAddr, u16);
+pub type SniVal = (String, Instant);
+pub type SniCacheMap = HashMap<SniKey, SniVal>;
+pub type SniCache = Arc<Mutex<SniCacheMap>>;
+type FlowBufMap = HashMap<SniKey, (Vec<u8>, Instant)>;
 
-static SNI_CACHE: OnceLock<Arc<Mutex<HashMap<SniKey, SniVal>>>> = OnceLock::new();
+static SNI_CACHE: OnceLock<SniCache> = OnceLock::new();
 static SNI_STARTED: OnceLock<()> = OnceLock::new();
 
-pub fn sni_cache() -> Arc<Mutex<HashMap<SniKey, SniVal>>> {
+pub fn sni_cache() -> SniCache {
     let cache = SNI_CACHE.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone();
 
     SNI_STARTED.get_or_init(|| {
@@ -44,7 +47,7 @@ pub fn lookup_sni(key: SniKey, ttl: Duration) -> Option<String> {
 }
 
 pub fn run_sni_sniffer(
-    cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(std::net::IpAddr, u16, std::net::IpAddr, u16), (String, std::time::Instant)>>>,
+    cache: SniCache,
     iface_name: Option<String>,
 ) {
     use std::collections::HashMap;
@@ -79,10 +82,12 @@ pub fn run_sni_sniffer(
         let cache = cache.clone();
 
         std::thread::spawn(move || {
-            let mut cfg = pnet::datalink::Config::default();
-            cfg.promiscuous = false;
-            cfg.read_timeout = Some(Duration::from_millis(50));
-            cfg.read_buffer_size = 1 << 20;
+            let cfg = pnet::datalink::Config {
+                promiscuous: false,
+                read_timeout: Some(Duration::from_millis(50)),
+                read_buffer_size: 1 << 20,
+                ..Default::default()
+            };
 
             let chan = match pnet::datalink::channel(&iface, cfg) {
                 Ok(pnet::datalink::Channel::Ethernet(_, rx)) => rx,
@@ -90,7 +95,7 @@ pub fn run_sni_sniffer(
             };
 
             let mut rx = chan;
-            let mut flows: HashMap<(IpAddr, u16, IpAddr, u16), (Vec<u8>, Instant)> = HashMap::new();
+            let mut flows: FlowBufMap = HashMap::new();
             let mut last_gc = Instant::now();
 
             loop {
@@ -272,11 +277,13 @@ pub fn sniff_sni_for_flow(local_ip: IpAddr, local_port: u16, remote_ip: IpAddr, 
 
     let iface = datalink::interfaces().into_iter().find(|ifc| ifc.ips.iter().any(|ipn| ipn.ip() == local_ip))?;
 
-    let mut cfg = Config::default();
-    cfg.promiscuous = false;
-    cfg.read_timeout = Some(Duration::from_millis(50));
-    cfg.read_buffer_size = 1 << 20;
-    cfg.write_buffer_size = 1 << 16;
+    let cfg = Config {
+        promiscuous: false,
+        read_timeout: Some(Duration::from_millis(50)),
+        read_buffer_size: 1 << 20,
+        write_buffer_size: 1 << 16,
+        ..Default::default()
+    };
 
     let channel = datalink::channel(&iface, cfg).ok()?;
 
