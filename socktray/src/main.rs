@@ -44,7 +44,14 @@ impl Callback<SockTrayEvent> for PrintCb {
 
 #[tokio::main]
 async fn main() {
-    let mut sensor = SockTray::new(Some(SockTrayConfig::default().pulse(Duration::from_secs(1)).dns(true).dns_ttl(Duration::from_secs(30))));
+    // Use a tighter pulse in demo mode so short-lived client sockets are less likely to be missed.
+    let mut sensor = SockTray::new(Some(
+        SockTrayConfig::default()
+            .pulse(Duration::from_millis(250))
+            .dns(true)
+            .dns_ttl(Duration::from_secs(30))
+            .skip_reverse_dns(true),
+    ));
     sensor.add("*");
     sensor.ignore("udp * * *");
 
