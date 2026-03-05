@@ -33,6 +33,8 @@ Emits lifecycle-style process events.
 Socket activity monitoring sensor.
 
 - Linux/Android: `/proc/net/*` snapshot diffing
+- NetBSD: `sysctl` PCB lists (libc)
+- FreeBSD: `kinfo_getfile()` via libutil/libc
 - Other targets: `netstat -an` fallback backend
 - Events:
   - Opened
@@ -94,7 +96,7 @@ curl -I https://example.com
 nc -vz 1.1.1.1 443
 ```
 
-NetBSD/FreeBSD (fallback backend uses `netstat -an`):
+NetBSD/FreeBSD:
 
 ```bash
 fetch -qo - https://example.com > /dev/null
