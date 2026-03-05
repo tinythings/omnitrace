@@ -173,9 +173,37 @@ impl SockTray {
     }
 
     fn parse_remote_ip(s: &events::SockKey) -> Option<IpAddr> {
-        let dec = s.remote_dec.as_deref().unwrap_or(&s.remote);
-        let (ip, _) = dec.rsplit_once(':')?;
-        ip.parse().ok()
+        let ep = s.remote_dec.as_deref().unwrap_or(&s.remote).trim();
+        if ep.is_empty() || ep == "*" || ep == "*.*" || ep == "*:*" {
+            return None;
+        }
+
+        if let Ok(ip) = ep.parse::<IpAddr>() {
+            return Some(ip);
+        }
+
+        if let Some(rest) = ep.strip_prefix('[')
+            && let Some((host, _tail)) = rest.split_once(']')
+            && let Ok(ip) = host.parse::<IpAddr>()
+        {
+            return Some(ip);
+        }
+
+        if let Some((host, port)) = ep.rsplit_once(':')
+            && port.parse::<u16>().is_ok()
+            && let Ok(ip) = host.parse::<IpAddr>()
+        {
+            return Some(ip);
+        }
+
+        if let Some((host, port)) = ep.rsplit_once('.')
+            && port.parse::<u16>().is_ok()
+            && let Ok(ip) = host.parse::<IpAddr>()
+        {
+            return Some(ip);
+        }
+
+        None
     }
 
     fn dns_cached(&mut self, ip: IpAddr) -> Option<String> {
