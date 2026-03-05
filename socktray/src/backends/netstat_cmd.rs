@@ -78,10 +78,9 @@ fn parse_netstat_line(line: &str) -> Option<SockKey> {
 #[async_trait::async_trait]
 impl SockBackend for NetstatBackend {
     async fn list(&self) -> io::Result<HashSet<SockKey>> {
-        let mut result = HashSet::new();
-
         #[cfg(any(target_os = "netbsd", target_os = "freebsd"))]
         {
+            let mut result = HashSet::new();
             let outs = [
                 Command::new("netstat").args(["-an", "-f", "inet"]).output().await,
                 Command::new("netstat").args(["-an", "-f", "inet6"]).output().await,
@@ -106,6 +105,7 @@ impl SockBackend for NetstatBackend {
 
         #[cfg(not(any(target_os = "netbsd", target_os = "freebsd")))]
         {
+            let mut result = HashSet::new();
             let out = Command::new("netstat").args(["-an"]).output().await?;
             if !out.status.success() {
                 return Ok(result);
@@ -116,8 +116,7 @@ impl SockBackend for NetstatBackend {
                     result.insert(sk);
                 }
             }
+            return Ok(result);
         }
-
-        Ok(result)
     }
 }

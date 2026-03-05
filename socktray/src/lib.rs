@@ -27,11 +27,12 @@ pub struct SockTrayConfig {
     pulse: Duration,
     dns: bool,
     dns_ttl: Duration,
+    skip_reverse_dns: bool,
 }
 
 impl Default for SockTrayConfig {
     fn default() -> Self {
-        Self { pulse: Duration::from_secs(1), dns: false, dns_ttl: Duration::from_secs(60) }
+        Self { pulse: Duration::from_secs(1), dns: false, dns_ttl: Duration::from_secs(60), skip_reverse_dns: false }
     }
 }
 
@@ -48,6 +49,12 @@ impl SockTrayConfig {
 
     pub fn dns_ttl(mut self, d: Duration) -> Self {
         self.dns_ttl = d;
+        self
+    }
+
+    /// Skip reverse DNS lookups for local/non-routable addresses.
+    pub fn skip_reverse_dns(mut self, on: bool) -> Self {
+        self.skip_reverse_dns = on;
         self
     }
 }
@@ -73,7 +80,21 @@ impl SockTray {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let backend: Arc<dyn SockBackend> = Arc::new(backends::linux_proc::LinuxProcBackend);
 
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        #[cfg(target_os = "netbsd")]
+        let backend: Arc<dyn SockBackend> = if backends::bsd_sysctl::supported() {
+            Arc::new(backends::bsd_sysctl::BsdSysctlBackend::default())
+        } else {
+            Arc::new(backends::netstat_cmd::NetstatBackend)
+        };
+
+        #[cfg(target_os = "freebsd")]
+        let backend: Arc<dyn SockBackend> = if backends::bsd_sysctl::supported() {
+            Arc::new(backends::bsd_sysctl::BsdSysctlBackend::default())
+        } else {
+            Arc::new(backends::netstat_cmd::NetstatBackend)
+        };
+
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "netbsd", target_os = "freebsd")))]
         let backend: Arc<dyn SockBackend> = Arc::new(backends::netstat_cmd::NetstatBackend);
 
         Self {
@@ -135,7 +156,8 @@ impl SockTray {
                     let mut sa: libc::sockaddr_in = std::mem::zeroed();
                     sa.sin_family = libc::AF_INET as _;
                     sa.sin_port = 0;
-                    sa.sin_addr = libc::in_addr { s_addr: u32::from_be_bytes(v4.octets()) };
+                    // `sin_addr.s_addr` must contain network-order bytes in memory.
+                    sa.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes(v4.octets()) };
 
                     libc::getnameinfo(
                         (&sa as *const libc::sockaddr_in).cast::<libc::sockaddr>(),
@@ -219,6 +241,26 @@ impl SockTray {
         Some(name)
     }
 
+    fn should_skip_reverse_dns(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        }
+    }
+
     fn enrich_dns(&mut self, s: &mut events::SockKey) {
         if !self.cfg.dns {
             return;
@@ -229,6 +271,9 @@ impl SockTray {
         let Some(ip) = Self::parse_remote_ip(s) else {
             return;
         };
+        if self.cfg.skip_reverse_dns && Self::should_skip_reverse_dns(ip) {
+            return;
+        }
         s.remote_host = self.dns_cached(ip);
     }
 
