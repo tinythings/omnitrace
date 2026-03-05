@@ -19,6 +19,7 @@ resolver = "2"
 members = [
     ".",
     "filescream", "netpacket",
+    "iface",
     "socktray",
     "procdog",
     "xmount"

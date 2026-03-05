@@ -10,8 +10,6 @@ use crate::netutil::{decode_tcp_state, is_hostish, is_ipish, reverse_dns};
 use glob::Pattern;
 use omnitrace_core::sensor::{Sensor, SensorCtx};
 use std::collections::HashMap;
-use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{collections::HashSet, future::Future, io, pin::Pin, time::Duration};
 use tokio::time;
@@ -59,7 +57,7 @@ pub struct NetNotify {
     watch_host: Vec<Pattern>,
     ignore_ip: Vec<Pattern>,
     ignore_host: Vec<Pattern>,
-    sni_cache: Arc<Mutex<HashMap<(IpAddr, u16, IpAddr, u16), (String, Instant)>>>,
+    sni_cache: tls_sni::SniCache,
 }
 
 impl Default for NetNotify {
@@ -81,7 +79,7 @@ impl NetNotify {
             watch_host: Vec::new(),
             ignore_ip: Vec::new(),
             ignore_host: Vec::new(),
-            sni_cache: Arc::new(Mutex::new(HashMap::new())),
+            sni_cache: tls_sni::sni_cache(),
         }
     }
 

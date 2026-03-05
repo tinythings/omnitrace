@@ -40,6 +40,16 @@ Socket activity monitoring sensor.
   - Opened
   - Closed
 
+### iface
+Network interface/link/address monitoring sensor.
+
+- Linux/Android: `rtnetlink`
+- NetBSD/FreeBSD: `PF_ROUTE` trigger + snapshot diff
+- Events:
+  - IfaceAdded / IfaceRemoved
+  - LinkUp / LinkDown
+  - AddrAdded / AddrRemoved
+
 ### filescream
 Filesystem watcher.
 
@@ -105,6 +115,38 @@ nc -vz 1.1.1.1 443
 
 You should see `opened` / `closed` lines in the `socktray` terminal.
 
+## Test From CLI (iface)
+
+Run the sensor:
+
+```bash
+cargo run -p iface
+```
+
+In another terminal, trigger interface/link/address events.
+
+Linux/Android:
+
+```bash
+ip link add dummy0 type dummy
+ip link set dummy0 up
+ip addr add 10.123.45.1/24 dev dummy0
+ip addr del 10.123.45.1/24 dev dummy0
+ip link del dummy0
+```
+
+NetBSD/FreeBSD:
+
+```bash
+ifconfig lo1 create
+ifconfig lo1 up
+ifconfig lo1 inet 10.123.45.1/24 alias
+ifconfig lo1 inet 10.123.45.1 delete
+ifconfig lo1 destroy
+```
+
+You should see `IfaceAdded/Removed`, `LinkUp/Down`, and `AddrAdded/Removed` lines in the `iface` terminal.
+
 ---
 
 ## Callback Model
@@ -137,6 +179,7 @@ Currently the main focus is Linux and NetBSD.
 |-------------|-------|--------|
 | xmount      | ✔     | ✔      |
 | procdog     | ✔     | ✔      |
+| iface       | ✔     | ✔      |
 | socktray    | ✔     | ✔      |
 | filescream  | ✔     | (planned) |
 

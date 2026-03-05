@@ -219,6 +219,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "iface"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitflags",
+ "libc",
+ "log",
+ "omnitrace-core",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "ignore"
 version = "0.4.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
