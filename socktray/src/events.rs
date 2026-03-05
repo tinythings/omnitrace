@@ -10,6 +10,7 @@ pub struct SockKey {
     pub local_dec: Option<String>,
     pub remote_dec: Option<String>,
     pub state_dec: Option<String>,
+    pub remote_host: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

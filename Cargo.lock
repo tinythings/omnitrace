@@ -609,6 +609,7 @@ dependencies = [
  "async-trait",
  "bitflags",
  "glob",
+ "libc",
  "log",
  "omnitrace-core",
  "serde",

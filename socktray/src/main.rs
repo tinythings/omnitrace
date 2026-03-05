@@ -22,12 +22,19 @@ impl Callback<SockTrayEvent> for PrintCb {
             SockTrayEvent::Closed { sock } => ("closed", sock),
         };
 
+        let remote_pretty = match (&s.remote_dec, &s.remote_host) {
+            (Some(ip_port), Some(host)) => format!("{ip_port} ({host})"),
+            (Some(ip_port), None) => ip_port.clone(),
+            (None, Some(host)) => format!("{} ({host})", s.remote),
+            (None, None) => s.remote.clone(),
+        };
+
         println!(
             "{} {} {} -> {} [{}]",
             kind,
             s.proto,
             s.local_dec.as_deref().unwrap_or(&s.local),
-            s.remote_dec.as_deref().unwrap_or(&s.remote),
+            remote_pretty,
             s.state_dec.as_deref().or(s.state.as_deref()).unwrap_or("-")
         );
 
@@ -37,7 +44,7 @@ impl Callback<SockTrayEvent> for PrintCb {
 
 #[tokio::main]
 async fn main() {
-    let mut sensor = SockTray::new(Some(SockTrayConfig::default().pulse(Duration::from_secs(1))));
+    let mut sensor = SockTray::new(Some(SockTrayConfig::default().pulse(Duration::from_secs(1)).dns(true).dns_ttl(Duration::from_secs(30))));
     sensor.add("*");
     sensor.ignore("udp * * *");
 

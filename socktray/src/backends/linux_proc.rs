@@ -76,7 +76,7 @@ fn parse_file(proto: &str, path: &str, is_tcp: bool, out: &mut HashSet<SockKey>)
         let remote_dec = decode_addr(&remote, is_v6);
         let state_dec = decode_tcp_state(state.as_deref());
 
-        out.insert(SockKey { proto: proto.to_string(), local, remote, state, local_dec, remote_dec, state_dec });
+        out.insert(SockKey { proto: proto.to_string(), local, remote, state, local_dec, remote_dec, state_dec, remote_host: None });
     }
     Ok(())
 }

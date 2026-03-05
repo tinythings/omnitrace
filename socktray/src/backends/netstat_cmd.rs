@@ -36,6 +36,7 @@ fn parse_netstat_line(line: &str) -> Option<SockKey> {
         local_dec: None,
         remote_dec: None,
         state_dec: None,
+        remote_host: None,
     })
 }
 

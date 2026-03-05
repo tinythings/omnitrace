@@ -12,6 +12,7 @@ async-trait.workspace = true
 glob = "0.3.3"
 serde.workspace = true
 log.workspace = true
+libc.workspace = true
 
 [lib]
 name = "socktray"
