@@ -17,6 +17,7 @@ pub struct ConnKey {
 
     pub local_host: Option<String>,
     pub remote_host: Option<String>,
+    pub remote_sni: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
-use netpacket::NetNotify;
 use netpacket::events::{NetNotifyEvent, NetNotifyMask};
+use netpacket::{NetNotify, NetNotifyConfig};
 use omnitrace_core::callbacks::{Callback, CallbackHub, CallbackResult};
 use omnitrace_core::sensor::spawn_sensor;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::channel;
@@ -46,6 +47,7 @@ impl Callback<NetNotifyEvent> for JsonCb {
                 "remote": conn.remote_dec,
                 "remote_host": conn.remote_host,
                 "state": conn.state_dec,
+                "remote_sni": conn.remote_sni,
             }
         }))
     }
@@ -53,16 +55,29 @@ impl Callback<NetNotifyEvent> for JsonCb {
 
 #[tokio::main]
 async fn main() {
-    let mut sensor = NetNotify::default().dns(true).dns_ttl(Duration::from_secs(5));
+    // Demo:
+    // SNI_IFACE=eth0 cargo run -p netpacket
+    // If unset, SNI sniffer runs in auto mode (UP non-loopback interfaces).
+    let mut cfg = NetNotifyConfig::default().pulse(Duration::from_secs(1));
+    if let Ok(iface) = env::var("SNI_IFACE")
+        && !iface.trim().is_empty()
+    {
+        println!("SNI capture interface: {}", iface);
+        cfg = cfg.sni_interface(iface);
+    } else {
+        println!("SNI capture interface: auto (all UP non-loopback interfaces)");
+    }
+
+    let mut sensor = NetNotify::new(Some(cfg)).dns(true).dns_ttl(Duration::from_secs(5));
 
     // Rule:
     // - add("*.google.com") => turns on reverse DNS + matches by hostname (glob)
     // - add("1.2.3.4") or add("1.2.3.4:443") => matches IP (no DNS needed)
     // - add("*") => “watch everything” (aka: eyeball cancer)
-    //sensor.add("*.google.com");
-    //sensor.add("8.8.8.8"); // IP-only filter example
+    // sensor.add("*.google.com");
+    // sensor.add("8.8.8.8"); // IP-only filter example
     sensor.add("*"); // if you hate yourself
-    // sensor.ignore("udp * *"); // optional noise filter
+    sensor.ignore("udp * *"); // optional noise filter
 
     let (tx, mut rx) = channel::<CallbackResult>(0xfff);
 

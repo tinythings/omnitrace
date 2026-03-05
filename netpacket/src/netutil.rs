@@ -167,3 +167,10 @@ pub(crate) fn is_hostish(p: &str) -> bool {
         // or has '*' and '.' (typical glob domain)
         || (p.contains('*') && p.contains('.'))
 }
+
+pub(crate) fn split_ip_port(s: &str) -> Option<(std::net::IpAddr, u16)> {
+    let (ip, port) = s.rsplit_once(':')?;
+    let ip: std::net::IpAddr = ip.parse().ok()?;
+    let port: u16 = port.parse().ok()?;
+    Some((ip, port))
+}

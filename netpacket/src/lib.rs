@@ -1,5 +1,6 @@
 pub mod events;
 pub mod netutil;
+pub mod tls_sni;
 
 #[cfg(test)]
 mod netutil_ut;
@@ -9,6 +10,8 @@ use crate::netutil::{decode_tcp_state, is_hostish, is_ipish, reverse_dns};
 use glob::Pattern;
 use omnitrace_core::sensor::{Sensor, SensorCtx};
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{collections::HashSet, future::Future, io, pin::Pin, time::Duration};
 use tokio::time;
@@ -17,17 +20,30 @@ pub struct NetNotifyConfig {
     pulse: Duration,
     dns: bool,
     dns_ttl: Duration,
+    sni_interface: Option<String>,
 }
 
 impl Default for NetNotifyConfig {
     fn default() -> Self {
-        Self { pulse: Duration::from_secs(1), dns: false, dns_ttl: Duration::from_secs(60) }
+        Self {
+            pulse: Duration::from_secs(1),
+            dns: false,
+            dns_ttl: Duration::from_secs(60),
+            sni_interface: None,
+        }
     }
 }
 
 impl NetNotifyConfig {
     pub fn pulse(mut self, d: Duration) -> Self {
         self.pulse = d;
+        self
+    }
+
+    /// Select a specific interface for TLS SNI sniffing (e.g. "eth0").
+    /// If unset, netpacket sniffs on all UP non-loopback interfaces.
+    pub fn sni_interface<S: Into<String>>(mut self, iface: S) -> Self {
+        self.sni_interface = Some(iface.into());
         self
     }
 }
@@ -43,6 +59,7 @@ pub struct NetNotify {
     watch_host: Vec<Pattern>,
     ignore_ip: Vec<Pattern>,
     ignore_host: Vec<Pattern>,
+    sni_cache: Arc<Mutex<HashMap<(IpAddr, u16, IpAddr, u16), (String, Instant)>>>,
 }
 
 impl Default for NetNotify {
@@ -64,6 +81,7 @@ impl NetNotify {
             watch_host: Vec::new(),
             ignore_ip: Vec::new(),
             ignore_host: Vec::new(),
+            sni_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -106,6 +124,7 @@ impl NetNotify {
                     state_dec,
                     local_host: None,
                     remote_host: None,
+                    remote_sni: None,
                 });
             }
             Ok(())
@@ -126,6 +145,16 @@ impl NetNotify {
 
     pub async fn run(mut self, ctx: SensorCtx<NetNotifyEvent>) {
         let mut ticker = time::interval(self.cfg.pulse);
+
+        // Start continuous SNI sniffer (MUST NOT block tokio).
+        // NOTE: if you ever create multiple NetNotify instances, make this "spawn once" globally.
+        {
+            let cache = self.sni_cache.clone();
+            let iface = self.cfg.sni_interface.clone();
+            std::thread::spawn(move || {
+                tls_sni::run_sni_sniffer(cache, iface);
+            });
+        }
 
         loop {
             tokio::select! {
@@ -151,7 +180,13 @@ impl NetNotify {
             let closed: Vec<ConnKey> = self.last.difference(&now).cloned().collect();
 
             for mut c in opened {
-                self.enrich_dns(&mut c); // remote only + cached
+                if c.proto.starts_with("tcp") && c.state_dec.as_deref() == Some("TIME_WAIT") {
+                    continue;
+                }
+
+                self.enrich_dns(&mut c);
+                self.enrich_sni_from_cache(&mut c); // <-- THIS is the missing piece
+
                 if self.matches(&c) {
                     Self::fire(&ctx.hub, NetNotifyEvent::Opened { conn: c }).await;
                 }
@@ -159,6 +194,8 @@ impl NetNotify {
 
             for mut c in closed {
                 self.enrich_dns(&mut c);
+                self.enrich_sni_from_cache(&mut c); // optional, but helpful
+
                 if self.matches(&c) {
                     Self::fire(&ctx.hub, NetNotifyEvent::Closed { conn: c }).await;
                 }
@@ -168,6 +205,49 @@ impl NetNotify {
         }
     }
 
+    fn enrich_sni_from_cache(&mut self, c: &mut ConnKey) {
+        if c.remote_sni.is_some() {
+            return;
+        }
+
+        // only tcp/tcp6
+        if c.proto != "tcp" && c.proto != "tcp6" {
+            return;
+        }
+
+        let Some(local_dec) = c.local_dec.as_deref() else {
+            return;
+        };
+        let Some(remote_dec) = c.remote_dec.as_deref() else {
+            return;
+        };
+
+        let Some((lip, lport)) = netutil::split_ip_port(local_dec) else {
+            return;
+        };
+        let Some((rip, rport)) = netutil::split_ip_port(remote_dec) else {
+            return;
+        };
+
+        // only HTTPS
+        if rport != 443 {
+            return;
+        }
+
+        // lookup from your sniffer cache
+        let key = (lip, lport, rip, rport);
+        let now = Instant::now();
+        let ttl = Duration::from_secs(300);
+
+        let mut map = self.sni_cache.lock().unwrap();
+
+        // cheap TTL cleanup
+        map.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+
+        if let Some((sni, _ts)) = map.get(&key) {
+            c.remote_sni = Some(sni.clone());
+        }
+    }
     pub fn add(&mut self, pat: &str) {
         let Ok(p) = Pattern::new(pat) else {
             return;
@@ -231,6 +311,39 @@ impl NetNotify {
         Some(name)
     }
 
+    async fn enrich_sni(&mut self, c: &mut ConnKey) {
+        if c.remote_sni.is_some() {
+            return;
+        }
+
+        // only tcp/tcp6
+        if c.proto != "tcp" && c.proto != "tcp6" {
+            return;
+        }
+
+        let Some(local_dec) = c.local_dec.as_deref() else {
+            return;
+        };
+        let Some(remote_dec) = c.remote_dec.as_deref() else {
+            return;
+        };
+
+        let Some((lip, lport)) = netutil::split_ip_port(local_dec) else {
+            return;
+        };
+        let Some((rip, rport)) = netutil::split_ip_port(remote_dec) else {
+            return;
+        };
+
+        // only HTTPS
+        if rport != 443 {
+            return;
+        }
+
+        // read from shared cache filled by run_sni_sniffer
+        c.remote_sni = crate::tls_sni::lookup_sni((lip, lport, rip, rport), Duration::from_secs(300));
+    }
+
     fn enrich_dns(&mut self, c: &mut ConnKey) {
         if !self.cfg.dns {
             return;
@@ -262,7 +375,10 @@ impl NetNotify {
         let remote_dec = c.remote_dec.as_deref().unwrap_or("-");
         let remote_ip = remote_dec.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(remote_dec);
 
-        let remote_host = c.remote_host.as_deref().unwrap_or("");
+        let mut remote_host = c.remote_host.as_deref().unwrap_or("");
+        if remote_host.is_empty() {
+            remote_host = c.remote_sni.as_deref().or(c.remote_host.as_deref()).unwrap_or("");
+        }
 
         // generic ignore (DSL: "udp * *", "tcp * 1.2.3.4:*", etc)
         if self.ignore.iter().any(|p| p.matches(&simple)) {
