@@ -26,10 +26,7 @@ pub struct CallbackHub<E> {
 
 impl<E> CallbackHub<E> {
     pub fn new() -> Self {
-        Self {
-            callbacks: Vec::new(),
-            results_tx: None,
-        }
+        Self { callbacks: Vec::new(), results_tx: None }
     }
 
     pub fn add<C: Callback<E> + 'static>(&mut self, cb: C) {
@@ -47,9 +44,10 @@ impl<E> CallbackHub<E> {
                 continue;
             }
             if let Some(r) = cb.call(ev).await
-                && let Some(tx) = &self.results_tx {
-                    let _ = tx.send(r).await;
-                }
+                && let Some(tx) = &self.results_tx
+            {
+                let _ = tx.send(r).await;
+            }
         }
     }
 }
