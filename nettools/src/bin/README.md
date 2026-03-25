@@ -33,6 +33,11 @@ Available demos
   - Prints events when neighbours are added, removed, or changed.
   - Supports IPv4 ARP entries and IPv6 neighbour entries when the host exposes them.
 
+- `nettools-route-lookup`
+  - Watches how the system would route specific destinations.
+  - Prints events when the chosen route changes.
+  - Supports both IPv4 and IPv6 targets.
+
 How to run
 
 Run the hostname demo:
@@ -69,6 +74,12 @@ Run the neighbours demo:
 
 ```bash
 cargo run -p nettools --bin nettools-neighbours
+```
+
+Run the route lookup demo:
+
+```bash
+cargo run -p nettools --bin nettools-route-lookup -- 8.8.8.8 2001:4860:4860::8888
 ```
 
 What to expect
@@ -358,6 +369,33 @@ Delete an entry to force re-learning:
 
 ```bash
 sudo ip neigh del 192.168.1.10 dev eth0
+```
+
+`nettools-route-lookup`
+
+- Start the binary with one or more destination IPs.
+- Change routes in another shell.
+- The demo prints lines such as:
+
+```text
+route lookup changed: 8.8.8.8 via 10.0.0.1 dev eth0 -> via 10.0.0.254 dev eth1
+route lookup changed: 2001:4860:4860::8888 via fe80::1 dev em0 -> via fe80::2 dev em1
+```
+
+Examples for route lookup changes
+
+Linux:
+
+```bash
+sudo ip route replace default via 10.0.0.254 dev eth0
+sudo ip -6 route replace default via fe80::2 dev eth0
+```
+
+BSD:
+
+```bash
+sudo route add default 10.0.0.254
+sudo route add -inet6 default fe80::2
 ```
 
 Notes

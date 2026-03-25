@@ -54,6 +54,11 @@ struct RouteKey {
     destination: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RouteLookupKey {
+    target: String,
+}
+
 #[derive(Clone, Debug)]
 struct NetHealthSample {
     total_probes: usize,
@@ -418,6 +423,7 @@ pub struct NetToolsConfig {
     nethealth: bool,
     sockets: bool,
     neighbours: bool,
+    route_lookups: bool,
     nethealth_window: usize,
     nethealth_timeout: Duration,
     nethealth_latency_degraded_ms: u64,
@@ -434,6 +440,7 @@ impl Default for NetToolsConfig {
             nethealth: false,
             sockets: false,
             neighbours: false,
+            route_lookups: false,
             nethealth_window: 4,
             nethealth_timeout: Duration::from_secs(2),
             nethealth_latency_degraded_ms: 400,
@@ -482,6 +489,11 @@ impl NetToolsConfig {
         self
     }
 
+    pub fn route_lookups(mut self, route_lookups: bool) -> Self {
+        self.route_lookups = route_lookups;
+        self
+    }
+
     pub fn nethealth_window(mut self, nethealth_window: usize) -> Self {
         self.nethealth_window = nethealth_window.max(1);
         self
@@ -517,6 +529,8 @@ pub struct NetTools {
     last_nethealth: Option<events::NetHealthState>,
     last_sockets: HashSet<events::SocketEntry>,
     last_neighbours: HashMap<String, events::NeighbourEntry>,
+    route_lookup_targets: Vec<String>,
+    last_route_lookups: HashMap<RouteLookupKey, events::RouteLookupEntry>,
 }
 
 impl Default for NetTools {
@@ -541,6 +555,8 @@ impl NetTools {
             last_nethealth: None,
             last_sockets: HashSet::new(),
             last_neighbours: HashMap::new(),
+            route_lookup_targets: Vec::new(),
+            last_route_lookups: HashMap::new(),
         }
     }
 
@@ -589,6 +605,13 @@ impl NetTools {
         });
     }
 
+    pub fn add_route_lookup_target<S>(&mut self, target: S)
+    where
+        S: Into<String>,
+    {
+        self.route_lookup_targets.push(target.into());
+    }
+
     async fn fire(hub: &CallbackHub<NetToolsEvent>, ev: NetToolsEvent) {
         hub.fire(ev.mask().bits(), &ev).await;
     }
@@ -621,6 +644,12 @@ impl NetTools {
         routes.into_iter().map(|route| (Self::route_key(&route), route)).collect()
     }
 
+    fn route_lookup_key(lookup: &events::RouteLookupEntry) -> RouteLookupKey {
+        RouteLookupKey {
+            target: lookup.target.clone(),
+        }
+    }
+
     fn is_default_route(route: &events::RouteEntry) -> bool {
         matches!(
             route.destination.as_str(),
@@ -630,6 +659,83 @@ impl NetTools {
 
     fn default_route(routes: &HashMap<RouteKey, events::RouteEntry>) -> Option<events::RouteEntry> {
         routes.values().find(|route| Self::is_default_route(route)).cloned()
+    }
+
+    fn parse_target(value: &str) -> Option<std::net::IpAddr> {
+        value.parse::<std::net::IpAddr>().ok()
+    }
+
+    fn route_prefix_len(route: &events::RouteEntry) -> Option<u8> {
+        match route.destination.as_str() {
+            "default" => Some(0),
+            "0.0.0.0" => Some(0),
+            "0.0.0.0/0" => Some(0),
+            "::/0" => Some(0),
+            destination => destination
+                .split_once('/')
+                .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
+                .or_else(|| Self::parse_target(destination).map(|ip| if ip.is_ipv4() { 32 } else { 128 })),
+        }
+    }
+
+    fn route_matches_target(route: &events::RouteEntry, target: std::net::IpAddr) -> bool {
+        match (target, route.destination.as_str()) {
+            (std::net::IpAddr::V4(_), "default" | "0.0.0.0" | "0.0.0.0/0") => true,
+            (std::net::IpAddr::V6(_), "::/0") => true,
+            (std::net::IpAddr::V4(target), destination) => destination
+                .split_once('/')
+                .and_then(|(network, prefix)| {
+                    let network = network.parse::<std::net::Ipv4Addr>().ok()?;
+                    let prefix = prefix.parse::<u32>().ok()?;
+                    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+                    Some((u32::from(target) & mask) == (u32::from(network) & mask))
+                })
+                .or_else(|| destination.parse::<std::net::Ipv4Addr>().ok().map(|network| network == target))
+                .unwrap_or(false),
+            (std::net::IpAddr::V6(target), destination) => destination
+                .split_once('/')
+                .and_then(|(network, prefix)| {
+                    let network = network.parse::<std::net::Ipv6Addr>().ok()?;
+                    let prefix = prefix.parse::<u32>().ok()?;
+                    let target = u128::from(target);
+                    let network = u128::from(network);
+                    let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+                    Some((target & mask) == (network & mask))
+                })
+                .or_else(|| destination.parse::<std::net::Ipv6Addr>().ok().map(|network| network == target))
+                .unwrap_or(false),
+        }
+    }
+
+    fn route_lookup(routes: &HashMap<RouteKey, events::RouteEntry>, target: &str) -> Option<events::RouteLookupEntry> {
+        let target_ip = Self::parse_target(target)?;
+        routes
+            .values()
+            .filter(|route| {
+                matches!(
+                    (&target_ip, &route.family),
+                    (std::net::IpAddr::V4(_), events::RouteFamily::Inet)
+                        | (std::net::IpAddr::V6(_), events::RouteFamily::Inet6)
+                        | (_, events::RouteFamily::Unknown)
+                ) && Self::route_matches_target(route, target_ip)
+            })
+            .max_by_key(|route| Self::route_prefix_len(route).unwrap_or(0))
+            .cloned()
+            .map(|route| events::RouteLookupEntry {
+                target: target.to_string(),
+                route,
+            })
+    }
+
+    fn route_lookup_map(
+        routes: &HashMap<RouteKey, events::RouteEntry>,
+        targets: &[String],
+    ) -> HashMap<RouteLookupKey, events::RouteLookupEntry> {
+        targets
+            .iter()
+            .filter_map(|target| Self::route_lookup(routes, target))
+            .map(|lookup| (Self::route_lookup_key(&lookup), lookup))
+            .collect()
     }
 
     fn trim_nethealth_samples(&mut self) {
@@ -844,6 +950,11 @@ impl NetTools {
         };
         let previous_default_route = self.cfg.default_routes.then(|| Self::default_route(&self.last_routes)).flatten();
         let current_default_route = self.cfg.default_routes.then(|| Self::default_route(&current_routes)).flatten();
+        let current_route_lookups = self
+            .cfg
+            .route_lookups
+            .then(|| Self::route_lookup_map(&current_routes, &self.route_lookup_targets))
+            .unwrap_or_default();
 
         if self.cfg.routes {
             for (route_key, current_route) in &current_routes {
@@ -901,7 +1012,45 @@ impl NetTools {
             Self::fire(hub, NetToolsEvent::DefaultRouteRemoved { route: previous_default_route.clone() }).await;
         }
 
+        if self.cfg.route_lookups {
+            for (lookup_key, current_lookup) in &current_route_lookups {
+                if let Some(previous_lookup) = self.last_route_lookups.get(lookup_key) {
+                    if previous_lookup != current_lookup {
+                        Self::fire(
+                            hub,
+                            NetToolsEvent::RouteLookupChanged {
+                                old: previous_lookup.clone(),
+                                new: current_lookup.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                } else {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::RouteLookupAdded {
+                            lookup: current_lookup.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+
+            for (lookup_key, previous_lookup) in &self.last_route_lookups {
+                if !current_route_lookups.contains_key(lookup_key) {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::RouteLookupRemoved {
+                            lookup: previous_lookup.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+
         self.last_routes = current_routes;
+        self.last_route_lookups = current_route_lookups;
     }
 
     pub async fn run(mut self, ctx: SensorCtx<NetToolsEvent>) {
@@ -909,8 +1058,9 @@ impl NetTools {
             self.handle_hostname_poll(&ctx.hub).await;
         }
 
-        if self.cfg.routes || self.cfg.default_routes {
+        if self.cfg.routes || self.cfg.default_routes || self.cfg.route_lookups {
             self.last_routes = Self::route_map(self.poll_routes().unwrap_or_default());
+            self.last_route_lookups = Self::route_lookup_map(&self.last_routes, &self.route_lookup_targets);
         }
 
         if self.cfg.nethealth {
@@ -935,7 +1085,7 @@ impl NetTools {
                         self.handle_hostname_poll(&ctx.hub).await;
                     }
 
-                    if self.cfg.routes || self.cfg.default_routes {
+                    if self.cfg.routes || self.cfg.default_routes || self.cfg.route_lookups {
                         self.handle_route_poll(&ctx.hub).await;
                     }
 

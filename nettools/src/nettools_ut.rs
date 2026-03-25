@@ -190,6 +190,15 @@ impl Callback<NetToolsEvent> for JsonCb {
             NetToolsEvent::NeighbourChanged { old, new } => {
                 Some(serde_json::json!({ "event": "neighbour_changed", "old": old, "new": new }))
             }
+            NetToolsEvent::RouteLookupAdded { lookup } => {
+                Some(serde_json::json!({ "event": "route_lookup_added", "lookup": lookup }))
+            }
+            NetToolsEvent::RouteLookupRemoved { lookup } => {
+                Some(serde_json::json!({ "event": "route_lookup_removed", "lookup": lookup }))
+            }
+            NetToolsEvent::RouteLookupChanged { old, new } => {
+                Some(serde_json::json!({ "event": "route_lookup_changed", "old": old, "new": new }))
+            }
         }
     }
 }
@@ -645,4 +654,124 @@ async fn emits_neighbour_added_event_for_ipv6() {
     assert_eq!(event["event"], "neighbour_added");
     assert_eq!(event["neighbour"]["address"], "fe80::1");
     assert_eq!(event["neighbour"]["state"], "REACHABLE");
+}
+
+#[tokio::test]
+async fn emits_route_lookup_added_event() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .route_lookups(true),
+        ),
+    );
+    sensor.add_route_lookup_target("8.8.8.8");
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0")]),
+        Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0"), route("default", "10.0.0.1", "em0")]),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "route_lookup_added");
+    assert_eq!(event["lookup"]["target"], "8.8.8.8");
+    assert_eq!(event["lookup"]["route"]["gateway"], "10.0.0.1");
+}
+
+#[tokio::test]
+async fn emits_route_lookup_changed_event_for_longer_prefix() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .route_lookups(true),
+        ),
+    );
+    sensor.add_route_lookup_target("10.20.30.40");
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![route("default", "10.0.0.1", "em0")]),
+        Ok(vec![route("default", "10.0.0.1", "em0"), route("10.20.30.0/24", "10.0.0.254", "em1")]),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "route_lookup_changed");
+    assert_eq!(event["old"]["route"]["gateway"], "10.0.0.1");
+    assert_eq!(event["new"]["route"]["gateway"], "10.0.0.254");
+}
+
+#[tokio::test]
+async fn emits_route_lookup_changed_event_for_ipv6() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .route_lookups(true),
+        ),
+    );
+    sensor.add_route_lookup_target("2001:db8::1234");
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![RouteEntry {
+            family: RouteFamily::Inet6,
+            destination: "::/0".to_string(),
+            gateway: "fe80::1".to_string(),
+            iface: "em0".to_string(),
+        }]),
+        Ok(vec![
+            RouteEntry {
+                family: RouteFamily::Inet6,
+                destination: "::/0".to_string(),
+                gateway: "fe80::1".to_string(),
+                iface: "em0".to_string(),
+            },
+            RouteEntry {
+                family: RouteFamily::Inet6,
+                destination: "2001:db8::/64".to_string(),
+                gateway: "fe80::2".to_string(),
+                iface: "em1".to_string(),
+            },
+        ]),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "route_lookup_changed");
+    assert_eq!(event["old"]["route"]["gateway"], "fe80::1");
+    assert_eq!(event["new"]["route"]["gateway"], "fe80::2");
 }

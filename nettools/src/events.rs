@@ -61,6 +61,12 @@ pub struct NeighbourEntry {
     pub state: Option<String>,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteLookupEntry {
+    pub target: String,
+    pub route: RouteEntry,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetToolsEvent {
     HostnameChanged { old: String, new: String },
@@ -76,6 +82,9 @@ pub enum NetToolsEvent {
     NeighbourAdded { neighbour: NeighbourEntry },
     NeighbourRemoved { neighbour: NeighbourEntry },
     NeighbourChanged { old: NeighbourEntry, new: NeighbourEntry },
+    RouteLookupAdded { lookup: RouteLookupEntry },
+    RouteLookupRemoved { lookup: RouteLookupEntry },
+    RouteLookupChanged { old: RouteLookupEntry, new: RouteLookupEntry },
 }
 
 bitflags! {
@@ -94,6 +103,9 @@ bitflags! {
         const NEIGHBOUR_ADDED       = 0b10000000000;
         const NEIGHBOUR_REMOVED     = 0b100000000000;
         const NEIGHBOUR_CHANGED     = 0b1000000000000;
+        const ROUTE_LOOKUP_ADDED    = 0b10000000000000;
+        const ROUTE_LOOKUP_REMOVED  = 0b100000000000000;
+        const ROUTE_LOOKUP_CHANGED  = 0b1000000000000000;
     }
 }
 
@@ -113,6 +125,9 @@ impl NetToolsEvent {
             NetToolsEvent::NeighbourAdded { .. } => NetToolsMask::NEIGHBOUR_ADDED,
             NetToolsEvent::NeighbourRemoved { .. } => NetToolsMask::NEIGHBOUR_REMOVED,
             NetToolsEvent::NeighbourChanged { .. } => NetToolsMask::NEIGHBOUR_CHANGED,
+            NetToolsEvent::RouteLookupAdded { .. } => NetToolsMask::ROUTE_LOOKUP_ADDED,
+            NetToolsEvent::RouteLookupRemoved { .. } => NetToolsMask::ROUTE_LOOKUP_REMOVED,
+            NetToolsEvent::RouteLookupChanged { .. } => NetToolsMask::ROUTE_LOOKUP_CHANGED,
         }
     }
 }

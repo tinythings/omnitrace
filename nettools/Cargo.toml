@@ -41,3 +41,7 @@ path = "src/bin/nettools-sockets.rs"
 [[bin]]
 name = "nettools-neighbours"
 path = "src/bin/nettools-neighbours.rs"
+
+[[bin]]
+name = "nettools-route-lookup"
+path = "src/bin/nettools-route-lookup.rs"
