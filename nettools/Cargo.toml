@@ -19,5 +19,9 @@ name = "nettools"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nettools"
-path = "src/main.rs"
+name = "nettools-hostchange"
+path = "src/bin/nettools-hostchange.rs"
+
+[[bin]]
+name = "nettools-routes"
+path = "src/bin/nettools-routes.rs"

@@ -9,9 +9,11 @@ use omnitrace_core::{
     sensor::{Sensor, SensorCtx},
 };
 use std::{
+    collections::HashMap,
     future::Future,
     io,
     pin::Pin,
+    process::Command,
     sync::Arc,
     time::Duration,
 };
@@ -20,7 +22,18 @@ pub trait HostnameBackend: Send + Sync {
     fn current(&self) -> io::Result<String>;
 }
 
+pub trait RouteBackend: Send + Sync {
+    fn list(&self) -> io::Result<Vec<events::RouteEntry>>;
+}
+
 pub struct LiveHostnameBackend;
+pub struct LiveRouteBackend;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RouteKey {
+    family: events::RouteFamily,
+    destination: String,
+}
 
 impl LiveHostnameBackend {
     fn read_hostname() -> io::Result<String> {
@@ -41,13 +54,92 @@ impl HostnameBackend for LiveHostnameBackend {
     }
 }
 
+impl LiveRouteBackend {
+    fn current_family(line: &str, current_family: &events::RouteFamily) -> events::RouteFamily {
+        if line.starts_with("Internet6:") || line.starts_with("Kernel IPv6 routing table") {
+            return events::RouteFamily::Inet6;
+        }
+
+        if line.starts_with("Internet:") || line.starts_with("Kernel IP routing table") {
+            return events::RouteFamily::Inet;
+        }
+
+        current_family.clone()
+    }
+
+    fn parse_line(line: &str, current_family: &events::RouteFamily) -> Option<events::RouteEntry> {
+        if line.is_empty()
+            || line.starts_with("Destination")
+            || line.starts_with("Routing")
+            || line.starts_with("Kernel")
+            || line.starts_with("Internet")
+        {
+            return None;
+        }
+
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+
+        if fields.len() < 3 {
+            return None;
+        }
+
+        Some(events::RouteEntry {
+            family: if matches!(current_family, events::RouteFamily::Unknown) {
+                if fields.first().is_some_and(|value| value.contains(':')) || fields.get(1).is_some_and(|value| value.contains(':')) {
+                    events::RouteFamily::Inet6
+                } else {
+                    events::RouteFamily::Inet
+                }
+            } else {
+                current_family.clone()
+            },
+            destination: fields.first().unwrap_or(&"").to_string(),
+            gateway: fields.get(1).unwrap_or(&"").to_string(),
+            iface: fields.last().unwrap_or(&"").to_string(),
+        })
+    }
+
+    fn parse_routes(output: &str) -> Vec<events::RouteEntry> {
+        output
+            .lines()
+            .fold((Vec::new(), events::RouteFamily::Unknown), |(mut routes, current_family), line| {
+                let updated_family = Self::current_family(line.trim(), &current_family);
+
+                if let Some(route) = Self::parse_line(line.trim(), &updated_family) {
+                    routes.push(route);
+                }
+
+                (routes, updated_family)
+            })
+            .0
+    }
+}
+
+impl RouteBackend for LiveRouteBackend {
+    fn list(&self) -> io::Result<Vec<events::RouteEntry>> {
+        Command::new("netstat")
+            .arg("-rn")
+            .output()
+            .map_err(io::Error::other)
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(Self::parse_routes(&String::from_utf8_lossy(&output.stdout)))
+                } else {
+                    Err(io::Error::other(String::from_utf8_lossy(&output.stderr).to_string()))
+                }
+            })
+    }
+}
+
 pub struct NetToolsConfig {
     pulse: Duration,
+    hostname: bool,
+    routes: bool,
 }
 
 impl Default for NetToolsConfig {
     fn default() -> Self {
-        Self { pulse: Duration::from_secs(3) }
+        Self { pulse: Duration::from_secs(3), hostname: true, routes: true }
     }
 }
 
@@ -60,12 +152,24 @@ impl NetToolsConfig {
     fn get_pulse(&self) -> Duration {
         self.pulse
     }
+
+    pub fn hostname(mut self, hostname: bool) -> Self {
+        self.hostname = hostname;
+        self
+    }
+
+    pub fn routes(mut self, routes: bool) -> Self {
+        self.routes = routes;
+        self
+    }
 }
 
 pub struct NetTools {
     cfg: NetToolsConfig,
-    backend: Arc<dyn HostnameBackend>,
+    hostname_backend: Arc<dyn HostnameBackend>,
+    route_backend: Arc<dyn RouteBackend>,
     last_hostname: Option<String>,
+    last_routes: HashMap<RouteKey, events::RouteEntry>,
 }
 
 impl Default for NetTools {
@@ -78,16 +182,25 @@ impl NetTools {
     pub fn new(cfg: Option<NetToolsConfig>) -> Self {
         Self {
             cfg: cfg.unwrap_or_default(),
-            backend: Arc::new(LiveHostnameBackend),
+            hostname_backend: Arc::new(LiveHostnameBackend),
+            route_backend: Arc::new(LiveRouteBackend),
             last_hostname: None,
+            last_routes: HashMap::new(),
         }
     }
 
-    pub fn set_backend<B>(&mut self, backend: B)
+    pub fn set_hostname_backend<B>(&mut self, backend: B)
     where
         B: HostnameBackend + 'static,
     {
-        self.backend = Arc::new(backend);
+        self.hostname_backend = Arc::new(backend);
+    }
+
+    pub fn set_route_backend<B>(&mut self, backend: B)
+    where
+        B: RouteBackend + 'static,
+    {
+        self.route_backend = Arc::new(backend);
     }
 
     async fn fire(hub: &CallbackHub<NetToolsEvent>, ev: NetToolsEvent) {
@@ -95,11 +208,23 @@ impl NetTools {
     }
 
     fn poll_hostname(&self) -> io::Result<String> {
-        self.backend.current()
+        self.hostname_backend.current()
+    }
+
+    fn poll_routes(&self) -> io::Result<Vec<events::RouteEntry>> {
+        self.route_backend.list()
     }
 
     fn store_hostname(&mut self, hostname: String) {
         self.last_hostname = Some(hostname);
+    }
+
+    fn route_key(route: &events::RouteEntry) -> RouteKey {
+        RouteKey { family: route.family.clone(), destination: route.destination.clone() }
+    }
+
+    fn route_map(routes: Vec<events::RouteEntry>) -> HashMap<RouteKey, events::RouteEntry> {
+        routes.into_iter().map(|route| (Self::route_key(&route), route)).collect()
     }
 
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
@@ -124,15 +249,61 @@ impl NetTools {
         self.store_hostname(current_hostname);
     }
 
+    async fn handle_route_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
+        let current_routes = match self.poll_routes() {
+            Ok(current_routes) => Self::route_map(current_routes),
+            Err(err) => {
+                log::error!("nettools: failed to read routes: {err}");
+                return;
+            }
+        };
+
+        for (route_key, current_route) in &current_routes {
+            if let Some(previous_route) = self.last_routes.get(route_key) {
+                if previous_route != current_route {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::RouteChanged { old: previous_route.clone(), new: current_route.clone() },
+                    )
+                    .await;
+                }
+            } else {
+                Self::fire(hub, NetToolsEvent::RouteAdded { route: current_route.clone() }).await;
+            }
+        }
+
+        for (route_key, previous_route) in &self.last_routes {
+            if !current_routes.contains_key(route_key) {
+                Self::fire(hub, NetToolsEvent::RouteRemoved { route: previous_route.clone() }).await;
+            }
+        }
+
+        self.last_routes = current_routes;
+    }
+
     pub async fn run(mut self, ctx: SensorCtx<NetToolsEvent>) {
-        self.handle_hostname_poll(&ctx.hub).await;
+        if self.cfg.hostname {
+            self.handle_hostname_poll(&ctx.hub).await;
+        }
+
+        if self.cfg.routes {
+            self.last_routes = Self::route_map(self.poll_routes().unwrap_or_default());
+        }
 
         let mut ticker = tokio::time::interval(self.cfg.get_pulse());
 
         loop {
             tokio::select! {
                 _ = ctx.cancel.cancelled() => break,
-                _ = ticker.tick() => self.handle_hostname_poll(&ctx.hub).await,
+                _ = ticker.tick() => {
+                    if self.cfg.hostname {
+                        self.handle_hostname_poll(&ctx.hub).await;
+                    }
+
+                    if self.cfg.routes {
+                        self.handle_route_poll(&ctx.hub).await;
+                    }
+                },
             }
         }
     }
