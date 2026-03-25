@@ -15,6 +15,10 @@ Available demos
   - Watches the routing table.
   - Prints events when routes are added, removed, or changed.
 
+- `nettools-default-route`
+  - Watches the default route specifically.
+  - Prints events when the default route is added, removed, or changed.
+
 How to run
 
 Run the hostname demo:
@@ -27,6 +31,12 @@ Run the routes demo:
 
 ```bash
 cargo run -p nettools --bin nettools-routes
+```
+
+Run the default route demo:
+
+```bash
+cargo run -p nettools --bin nettools-default-route
 ```
 
 What to expect
@@ -137,6 +147,61 @@ Change a route:
 ```bash
 sudo route delete -net 10.20.30.0/24 192.168.1.1
 sudo route add -net 10.20.30.0/24 192.168.1.254
+```
+
+Change default route:
+
+```bash
+sudo route delete default 192.168.1.1
+sudo route add default 192.168.1.254
+```
+
+`nettools-default-route`
+
+- Start the binary.
+- Change only the default route in another shell.
+- The demo prints lines such as:
+
+```text
+default route added: default via 192.168.1.1 dev em0
+default route removed: default via 192.168.1.1 dev em0
+default route changed: default via 192.168.1.1 dev em0 -> via 192.168.1.254 dev em1
+```
+
+Examples for default route changes
+
+Linux:
+
+Add default route:
+
+```bash
+sudo ip route add default via 192.168.1.1 dev eth0
+```
+
+Delete default route:
+
+```bash
+sudo ip route del default
+```
+
+Change default route:
+
+```bash
+sudo ip route replace default via 192.168.1.254 dev eth0
+```
+
+FreeBSD / NetBSD / OpenBSD:
+
+Add default route:
+
+```bash
+sudo route add default 192.168.1.1
+```
+
+Delete default route:
+
+```bash
+sudo route delete default 192.168.1.1
 ```
 
 Change default route:

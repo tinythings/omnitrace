@@ -25,3 +25,7 @@ path = "src/bin/nettools-hostchange.rs"
 [[bin]]
 name = "nettools-routes"
 path = "src/bin/nettools-routes.rs"
+
+[[bin]]
+name = "nettools-default-route"
+path = "src/bin/nettools-default-route.rs"

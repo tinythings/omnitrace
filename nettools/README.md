@@ -11,6 +11,7 @@ Right now it can:
 - emit a `HostnameChanged` event when the hostname changes
 - read the routing table
 - emit route added, removed, and changed events
+- detect default route changes as first-class events
 
 This crate is intended to hold things such as:
 
@@ -26,3 +27,4 @@ Example binaries:
 
 - `cargo run -p nettools --bin nettools-hostchange`
 - `cargo run -p nettools --bin nettools-routes`
+- `cargo run -p nettools --bin nettools-default-route`

@@ -135,11 +135,12 @@ pub struct NetToolsConfig {
     pulse: Duration,
     hostname: bool,
     routes: bool,
+    default_routes: bool,
 }
 
 impl Default for NetToolsConfig {
     fn default() -> Self {
-        Self { pulse: Duration::from_secs(3), hostname: true, routes: true }
+        Self { pulse: Duration::from_secs(3), hostname: true, routes: true, default_routes: true }
     }
 }
 
@@ -160,6 +161,11 @@ impl NetToolsConfig {
 
     pub fn routes(mut self, routes: bool) -> Self {
         self.routes = routes;
+        self
+    }
+
+    pub fn default_routes(mut self, default_routes: bool) -> Self {
+        self.default_routes = default_routes;
         self
     }
 }
@@ -227,6 +233,17 @@ impl NetTools {
         routes.into_iter().map(|route| (Self::route_key(&route), route)).collect()
     }
 
+    fn is_default_route(route: &events::RouteEntry) -> bool {
+        matches!(
+            route.destination.as_str(),
+            "default" | "0.0.0.0/0" | "0.0.0.0" | "::/0"
+        )
+    }
+
+    fn default_route(routes: &HashMap<RouteKey, events::RouteEntry>) -> Option<events::RouteEntry> {
+        routes.values().find(|route| Self::is_default_route(route)).cloned()
+    }
+
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
         let current_hostname = match self.poll_hostname() {
             Ok(current_hostname) => current_hostname,
@@ -257,25 +274,63 @@ impl NetTools {
                 return;
             }
         };
+        let previous_default_route = self.cfg.default_routes.then(|| Self::default_route(&self.last_routes)).flatten();
+        let current_default_route = self.cfg.default_routes.then(|| Self::default_route(&current_routes)).flatten();
 
-        for (route_key, current_route) in &current_routes {
-            if let Some(previous_route) = self.last_routes.get(route_key) {
-                if previous_route != current_route {
+        if self.cfg.routes {
+            for (route_key, current_route) in &current_routes {
+                if let Some(previous_route) = self.last_routes.get(route_key) {
+                    if previous_route != current_route {
+                        Self::fire(
+                            hub,
+                            NetToolsEvent::RouteChanged {
+                                old: previous_route.clone(),
+                                new: current_route.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                } else {
                     Self::fire(
                         hub,
-                        NetToolsEvent::RouteChanged { old: previous_route.clone(), new: current_route.clone() },
+                        NetToolsEvent::RouteAdded {
+                            route: current_route.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+
+            for (route_key, previous_route) in &self.last_routes {
+                if !current_routes.contains_key(route_key) {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::RouteRemoved {
+                            route: previous_route.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+
+        if let Some(current_default_route) = current_default_route.as_ref() {
+            if let Some(previous_default_route) = previous_default_route.as_ref() {
+                if previous_default_route != current_default_route {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::DefaultRouteChanged {
+                            old: previous_default_route.clone(),
+                            new: current_default_route.clone(),
+                        },
                     )
                     .await;
                 }
             } else {
-                Self::fire(hub, NetToolsEvent::RouteAdded { route: current_route.clone() }).await;
+                Self::fire(hub, NetToolsEvent::DefaultRouteAdded { route: current_default_route.clone() }).await;
             }
-        }
-
-        for (route_key, previous_route) in &self.last_routes {
-            if !current_routes.contains_key(route_key) {
-                Self::fire(hub, NetToolsEvent::RouteRemoved { route: previous_route.clone() }).await;
-            }
+        } else if let Some(previous_default_route) = previous_default_route.as_ref() {
+            Self::fire(hub, NetToolsEvent::DefaultRouteRemoved { route: previous_default_route.clone() }).await;
         }
 
         self.last_routes = current_routes;
@@ -286,7 +341,7 @@ impl NetTools {
             self.handle_hostname_poll(&ctx.hub).await;
         }
 
-        if self.cfg.routes {
+        if self.cfg.routes || self.cfg.default_routes {
             self.last_routes = Self::route_map(self.poll_routes().unwrap_or_default());
         }
 
@@ -300,7 +355,7 @@ impl NetTools {
                         self.handle_hostname_poll(&ctx.hub).await;
                     }
 
-                    if self.cfg.routes {
+                    if self.cfg.routes || self.cfg.default_routes {
                         self.handle_route_poll(&ctx.hub).await;
                     }
                 },

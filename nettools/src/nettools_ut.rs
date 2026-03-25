@@ -61,6 +61,15 @@ impl Callback<NetToolsEvent> for JsonCb {
             NetToolsEvent::RouteChanged { old, new } => {
                 Some(serde_json::json!({ "event": "route_changed", "old": old, "new": new }))
             }
+            NetToolsEvent::DefaultRouteAdded { route } => {
+                Some(serde_json::json!({ "event": "default_route_added", "route": route }))
+            }
+            NetToolsEvent::DefaultRouteRemoved { route } => {
+                Some(serde_json::json!({ "event": "default_route_removed", "route": route }))
+            }
+            NetToolsEvent::DefaultRouteChanged { old, new } => {
+                Some(serde_json::json!({ "event": "default_route_changed", "old": old, "new": new }))
+            }
         }
     }
 }
@@ -176,6 +185,51 @@ async fn emits_route_changed_event() {
     let _ = sensor_task.await;
 
     assert_eq!(event["event"], "route_changed");
+    assert_eq!(event["old"]["gateway"], "10.0.0.1");
+    assert_eq!(event["new"]["gateway"], "10.0.0.254");
+}
+
+#[tokio::test]
+async fn emits_default_route_added_event() {
+    let mut sensor = NetTools::new(
+        Some(NetToolsConfig::default().pulse(Duration::from_millis(10)).hostname(false).routes(false).default_routes(true)),
+    );
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0")]), Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0"), route("default", "10.0.0.1", "em0")])]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "default_route_added");
+    assert_eq!(event["route"]["destination"], "default");
+}
+
+#[tokio::test]
+async fn emits_default_route_changed_event() {
+    let mut sensor = NetTools::new(
+        Some(NetToolsConfig::default().pulse(Duration::from_millis(10)).hostname(false).routes(false).default_routes(true)),
+    );
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![Ok(vec![route("default", "10.0.0.1", "em0")]), Ok(vec![route("default", "10.0.0.254", "em1")])]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "default_route_changed");
     assert_eq!(event["old"]["gateway"], "10.0.0.1");
     assert_eq!(event["new"]["gateway"], "10.0.0.254");
 }

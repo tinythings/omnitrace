@@ -22,15 +22,21 @@ pub enum NetToolsEvent {
     RouteAdded { route: RouteEntry },
     RouteRemoved { route: RouteEntry },
     RouteChanged { old: RouteEntry, new: RouteEntry },
+    DefaultRouteAdded { route: RouteEntry },
+    DefaultRouteRemoved { route: RouteEntry },
+    DefaultRouteChanged { old: RouteEntry, new: RouteEntry },
 }
 
 bitflags! {
     #[derive(Copy, Clone, Debug)]
     pub struct NetToolsMask: u64 {
-        const HOSTNAME_CHANGED = 0b0001;
-        const ROUTE_ADDED      = 0b0010;
-        const ROUTE_REMOVED    = 0b0100;
-        const ROUTE_CHANGED    = 0b1000;
+        const HOSTNAME_CHANGED      = 0b0000001;
+        const ROUTE_ADDED           = 0b0000010;
+        const ROUTE_REMOVED         = 0b0000100;
+        const ROUTE_CHANGED         = 0b0001000;
+        const DEFAULT_ROUTE_ADDED   = 0b0010000;
+        const DEFAULT_ROUTE_REMOVED = 0b0100000;
+        const DEFAULT_ROUTE_CHANGED = 0b1000000;
     }
 }
 
@@ -41,6 +47,9 @@ impl NetToolsEvent {
             NetToolsEvent::RouteAdded { .. } => NetToolsMask::ROUTE_ADDED,
             NetToolsEvent::RouteRemoved { .. } => NetToolsMask::ROUTE_REMOVED,
             NetToolsEvent::RouteChanged { .. } => NetToolsMask::ROUTE_CHANGED,
+            NetToolsEvent::DefaultRouteAdded { .. } => NetToolsMask::DEFAULT_ROUTE_ADDED,
+            NetToolsEvent::DefaultRouteRemoved { .. } => NetToolsMask::DEFAULT_ROUTE_REMOVED,
+            NetToolsEvent::DefaultRouteChanged { .. } => NetToolsMask::DEFAULT_ROUTE_CHANGED,
         }
     }
 }
