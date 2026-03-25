@@ -37,3 +37,7 @@ path = "src/bin/nettools-nethealth.rs"
 [[bin]]
 name = "nettools-sockets"
 path = "src/bin/nettools-sockets.rs"
+
+[[bin]]
+name = "nettools-neighbours"
+path = "src/bin/nettools-neighbours.rs"

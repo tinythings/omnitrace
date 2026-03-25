@@ -1,6 +1,9 @@
 use crate::{
-    HostnameBackend, NetHealthBackend, NetTools, NetToolsConfig, RouteBackend, SocketBackend,
-    events::{NetHealthLevel, NetHealthTarget, NetToolsEvent, RouteEntry, RouteFamily, SocketEntry, SocketKind},
+    HostnameBackend, NeighbourBackend, NetHealthBackend, NetTools, NetToolsConfig, RouteBackend, SocketBackend,
+    events::{
+        NetHealthLevel, NetHealthTarget, NetToolsEvent, NeighbourEntry, RouteEntry, RouteFamily, SocketEntry,
+        SocketKind,
+    },
 };
 use async_trait::async_trait;
 use omnitrace_core::{
@@ -8,7 +11,7 @@ use omnitrace_core::{
     sensor::spawn_sensor,
 };
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     sync::{Arc, Mutex},
     time::Duration,
@@ -70,6 +73,31 @@ impl RouteBackend for SequenceRouteBackend {
 struct SequenceSocketBackend {
     values: Mutex<VecDeque<io::Result<HashSet<SocketEntry>>>>,
     last: Mutex<Option<HashSet<SocketEntry>>>,
+}
+
+struct SequenceNeighbourBackend {
+    values: Mutex<VecDeque<io::Result<HashMap<String, NeighbourEntry>>>>,
+    last: Mutex<Option<HashMap<String, NeighbourEntry>>>,
+}
+
+impl SequenceNeighbourBackend {
+    fn new(values: Vec<io::Result<HashMap<String, NeighbourEntry>>>) -> Self {
+        Self { values: Mutex::new(values.into()), last: Mutex::new(None) }
+    }
+}
+
+impl NeighbourBackend for SequenceNeighbourBackend {
+    fn list(&self) -> io::Result<HashMap<String, NeighbourEntry>> {
+        if let Some(value) = self.values.lock().unwrap().pop_front() {
+            if let Ok(neighbours) = &value {
+                *self.last.lock().unwrap() = Some(neighbours.clone());
+            }
+
+            return value;
+        }
+
+        Ok(self.last.lock().unwrap().clone().unwrap_or_default())
+    }
 }
 
 impl SequenceSocketBackend {
@@ -153,6 +181,15 @@ impl Callback<NetToolsEvent> for JsonCb {
             NetToolsEvent::SocketRemoved { socket } => {
                 Some(serde_json::json!({ "event": "socket_removed", "socket": socket }))
             }
+            NetToolsEvent::NeighbourAdded { neighbour } => {
+                Some(serde_json::json!({ "event": "neighbour_added", "neighbour": neighbour }))
+            }
+            NetToolsEvent::NeighbourRemoved { neighbour } => {
+                Some(serde_json::json!({ "event": "neighbour_removed", "neighbour": neighbour }))
+            }
+            NetToolsEvent::NeighbourChanged { old, new } => {
+                Some(serde_json::json!({ "event": "neighbour_changed", "old": old, "new": new }))
+            }
         }
     }
 }
@@ -173,6 +210,15 @@ fn socket(proto: &str, local: &str, remote: &str, state: Option<&str>, kind: Soc
         remote: remote.to_string(),
         state: state.map(str::to_string),
         kind,
+    }
+}
+
+fn neighbour(address: &str, mac: &str, iface: &str, state: Option<&str>) -> NeighbourEntry {
+    NeighbourEntry {
+        address: address.to_string(),
+        mac: mac.to_string(),
+        iface: iface.to_string(),
+        state: state.map(str::to_string),
     }
 }
 
@@ -455,4 +501,148 @@ async fn emits_socket_removed_event_for_connection() {
     assert_eq!(event["event"], "socket_removed");
     assert_eq!(event["socket"]["kind"], serde_json::json!(SocketKind::Connection));
     assert_eq!(event["socket"]["remote"], "10.0.0.10:443");
+}
+
+#[tokio::test]
+async fn emits_socket_added_event_for_ipv6_listener() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .sockets(true),
+        ),
+    );
+    sensor.set_socket_backend(SequenceSocketBackend::new(vec![
+        Ok(HashSet::new()),
+        Ok(HashSet::from([socket("tcp6", "[::1]:443", "[::]:0", Some("LISTEN"), SocketKind::Listener)])),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "socket_added");
+    assert_eq!(event["socket"]["proto"], "tcp6");
+    assert_eq!(event["socket"]["local"], "[::1]:443");
+}
+
+#[tokio::test]
+async fn emits_neighbour_added_event() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .neighbours(true),
+        ),
+    );
+    sensor.set_neighbour_backend(SequenceNeighbourBackend::new(vec![
+        Ok(HashMap::new()),
+        Ok(HashMap::from([(
+            "192.168.1.10".to_string(),
+            neighbour("192.168.1.10", "aa:bb:cc:dd:ee:ff", "eth0", Some("0x2")),
+        )])),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "neighbour_added");
+    assert_eq!(event["neighbour"]["address"], "192.168.1.10");
+    assert_eq!(event["neighbour"]["mac"], "aa:bb:cc:dd:ee:ff");
+}
+
+#[tokio::test]
+async fn emits_neighbour_changed_event() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .neighbours(true),
+        ),
+    );
+    sensor.set_neighbour_backend(SequenceNeighbourBackend::new(vec![
+        Ok(HashMap::from([(
+            "192.168.1.10".to_string(),
+            neighbour("192.168.1.10", "aa:bb:cc:dd:ee:ff", "eth0", Some("0x2")),
+        )])),
+        Ok(HashMap::from([(
+            "192.168.1.10".to_string(),
+            neighbour("192.168.1.10", "11:22:33:44:55:66", "eth1", Some("0x6")),
+        )])),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "neighbour_changed");
+    assert_eq!(event["old"]["iface"], "eth0");
+    assert_eq!(event["new"]["iface"], "eth1");
+}
+
+#[tokio::test]
+async fn emits_neighbour_added_event_for_ipv6() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .neighbours(true),
+        ),
+    );
+    sensor.set_neighbour_backend(SequenceNeighbourBackend::new(vec![
+        Ok(HashMap::new()),
+        Ok(HashMap::from([(
+            "fe80::1".to_string(),
+            neighbour("fe80::1", "aa:bb:cc:dd:ee:ff", "eth0", Some("REACHABLE")),
+        )])),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "neighbour_added");
+    assert_eq!(event["neighbour"]["address"], "fe80::1");
+    assert_eq!(event["neighbour"]["state"], "REACHABLE");
 }

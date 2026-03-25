@@ -53,6 +53,14 @@ pub struct SocketEntry {
     pub kind: SocketKind,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeighbourEntry {
+    pub address: String,
+    pub mac: String,
+    pub iface: String,
+    pub state: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetToolsEvent {
     HostnameChanged { old: String, new: String },
@@ -65,6 +73,9 @@ pub enum NetToolsEvent {
     NetHealthChanged { old: NetHealthState, new: NetHealthState },
     SocketAdded { socket: SocketEntry },
     SocketRemoved { socket: SocketEntry },
+    NeighbourAdded { neighbour: NeighbourEntry },
+    NeighbourRemoved { neighbour: NeighbourEntry },
+    NeighbourChanged { old: NeighbourEntry, new: NeighbourEntry },
 }
 
 bitflags! {
@@ -80,6 +91,9 @@ bitflags! {
         const NETHEALTH_CHANGED     = 0b10000000;
         const SOCKET_ADDED          = 0b100000000;
         const SOCKET_REMOVED        = 0b1000000000;
+        const NEIGHBOUR_ADDED       = 0b10000000000;
+        const NEIGHBOUR_REMOVED     = 0b100000000000;
+        const NEIGHBOUR_CHANGED     = 0b1000000000000;
     }
 }
 
@@ -96,6 +110,9 @@ impl NetToolsEvent {
             NetToolsEvent::NetHealthChanged { .. } => NetToolsMask::NETHEALTH_CHANGED,
             NetToolsEvent::SocketAdded { .. } => NetToolsMask::SOCKET_ADDED,
             NetToolsEvent::SocketRemoved { .. } => NetToolsMask::SOCKET_REMOVED,
+            NetToolsEvent::NeighbourAdded { .. } => NetToolsMask::NEIGHBOUR_ADDED,
+            NetToolsEvent::NeighbourRemoved { .. } => NetToolsMask::NEIGHBOUR_REMOVED,
+            NetToolsEvent::NeighbourChanged { .. } => NetToolsMask::NEIGHBOUR_CHANGED,
         }
     }
 }

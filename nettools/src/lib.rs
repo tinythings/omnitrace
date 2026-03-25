@@ -38,10 +38,15 @@ pub trait SocketBackend: Send + Sync {
     fn list(&self) -> io::Result<HashSet<events::SocketEntry>>;
 }
 
+pub trait NeighbourBackend: Send + Sync {
+    fn list(&self) -> io::Result<HashMap<String, events::NeighbourEntry>>;
+}
+
 pub struct LiveHostnameBackend;
 pub struct LiveRouteBackend;
 pub struct LiveNetHealthBackend;
 pub struct LiveSocketBackend;
+pub struct LiveNeighbourBackend;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RouteKey {
@@ -153,6 +158,14 @@ impl RouteBackend for LiveRouteBackend {
 }
 
 impl LiveSocketBackend {
+    fn format_socket_addr(ip: String, port: u16, v6: bool) -> String {
+        if v6 {
+            format!("[{ip}]:{port}")
+        } else {
+            format!("{ip}:{port}")
+        }
+    }
+
     fn hex_port(value: &str) -> Option<u16> {
         u16::from_str_radix(value, 16).ok()
     }
@@ -180,11 +193,15 @@ impl LiveSocketBackend {
             .and_then(|(ip_hex, port_hex)| Self::hex_port(port_hex).map(|port| (ip_hex, port)))
             .and_then(|(ip_hex, port)| {
                 if v6 {
-                    Self::dec_ipv6(ip_hex).map(|ip| format!("{ip}:{port}"))
+                    Self::dec_ipv6(ip_hex).map(|ip| Self::format_socket_addr(ip.to_string(), port, true))
                 } else {
-                    Self::dec_ipv4(ip_hex).map(|ip| format!("{ip}:{port}"))
+                    Self::dec_ipv4(ip_hex).map(|ip| Self::format_socket_addr(ip.to_string(), port, false))
                 }
             })
+    }
+
+    fn is_unspecified_remote(remote: &str) -> bool {
+        matches!(remote, "0.0.0.0:0" | "[::]:0")
     }
 
     fn decode_tcp_state(value: Option<&str>) -> Option<String> {
@@ -220,7 +237,7 @@ impl LiveSocketBackend {
                 let local_dec = Self::decode_addr(&local, is_v6).unwrap_or(local.clone());
                 let remote_dec = Self::decode_addr(&remote, is_v6).unwrap_or(remote.clone());
                 let kind = if state_dec.as_deref() == Some("LISTEN")
-                    || (!is_tcp && (remote_dec == "0.0.0.0:0" || remote_dec == "::0:0"))
+                    || (!is_tcp && Self::is_unspecified_remote(&remote_dec))
                 {
                     events::SocketKind::Listener
                 } else {
@@ -250,6 +267,133 @@ impl SocketBackend for LiveSocketBackend {
     }
 }
 
+impl LiveNeighbourBackend {
+    fn parse_proc_net_arp(content: &str) -> HashMap<String, events::NeighbourEntry> {
+        content
+            .lines()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(_, line)| {
+                let cols = line.split_whitespace().collect::<Vec<_>>();
+                (cols.len() >= 6).then(|| {
+                    (
+                        cols[0].to_string(),
+                        events::NeighbourEntry {
+                            address: cols[0].to_string(),
+                            mac: cols[3].to_string(),
+                            iface: cols[5].to_string(),
+                            state: Some(cols[2].to_string()),
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn parse_arp_line(line: &str) -> Option<events::NeighbourEntry> {
+        let address = line
+            .split_whitespace()
+            .find(|field| field.parse::<std::net::IpAddr>().is_ok())
+            .map(str::to_string)?;
+        let mac = line
+            .split_whitespace()
+            .find(|field| field.chars().filter(|ch| *ch == ':').count() == 5)
+            .map(str::to_string)?;
+        let iface = line
+            .split_whitespace()
+            .rev()
+            .find(|field| field.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.'))
+            .map(str::to_string)
+            .unwrap_or_default();
+
+        Some(events::NeighbourEntry {
+            address: address.clone(),
+            mac,
+            iface,
+            state: None,
+        })
+    }
+
+    fn parse_ip_neigh_line(line: &str) -> Option<events::NeighbourEntry> {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let address = fields
+            .first()
+            .filter(|field| field.parse::<std::net::IpAddr>().is_ok())
+            .map(|field| (*field).to_string())?;
+        let iface = fields
+            .windows(2)
+            .find(|window| window[0] == "dev")
+            .map(|window| window[1].to_string())
+            .unwrap_or_default();
+        let mac = fields
+            .windows(2)
+            .find(|window| matches!(window[0], "lladdr" | "at"))
+            .map(|window| window[1].to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let state = fields
+            .iter()
+            .rev()
+            .find(|field| field.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_'))
+            .map(|field| (*field).to_string());
+
+        Some(events::NeighbourEntry {
+            address: address.clone(),
+            mac,
+            iface,
+            state,
+        })
+    }
+
+    fn parse_neighbour_table(content: &str) -> HashMap<String, events::NeighbourEntry> {
+        content
+            .lines()
+            .filter_map(Self::parse_ip_neigh_line)
+            .map(|neighbour| (neighbour.address.clone(), neighbour))
+            .collect()
+    }
+}
+
+impl NeighbourBackend for LiveNeighbourBackend {
+    fn list(&self) -> io::Result<HashMap<String, events::NeighbourEntry>> {
+        std::fs::read_to_string("/proc/net/arp")
+            .map(|content| Self::parse_proc_net_arp(&content))
+            .or_else(|_| {
+                std::fs::read_to_string("/proc/net/ndisc_cache")
+                    .map(|content| Self::parse_neighbour_table(&content))
+            })
+            .or_else(|_| {
+                Command::new("ip")
+                    .arg("neigh")
+                    .output()
+                    .map_err(io::Error::other)
+                    .and_then(|output| {
+                        if output.status.success() {
+                            Ok(Self::parse_neighbour_table(&String::from_utf8_lossy(&output.stdout)))
+                        } else {
+                            Err(io::Error::other(String::from_utf8_lossy(&output.stderr).to_string()))
+                        }
+                    })
+            })
+            .or_else(|_| {
+                Command::new("arp")
+                    .arg("-an")
+                    .output()
+                    .map_err(io::Error::other)
+                    .and_then(|output| {
+                        if output.status.success() {
+                            Ok(String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .filter_map(Self::parse_arp_line)
+                                .map(|neighbour| (neighbour.address.clone(), neighbour))
+                                .collect())
+                        } else {
+                            Err(io::Error::other(String::from_utf8_lossy(&output.stderr).to_string()))
+                        }
+                    })
+            })
+    }
+}
+
 #[async_trait]
 impl NetHealthBackend for LiveNetHealthBackend {
     async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration> {
@@ -273,6 +417,7 @@ pub struct NetToolsConfig {
     default_routes: bool,
     nethealth: bool,
     sockets: bool,
+    neighbours: bool,
     nethealth_window: usize,
     nethealth_timeout: Duration,
     nethealth_latency_degraded_ms: u64,
@@ -288,6 +433,7 @@ impl Default for NetToolsConfig {
             default_routes: true,
             nethealth: false,
             sockets: false,
+            neighbours: false,
             nethealth_window: 4,
             nethealth_timeout: Duration::from_secs(2),
             nethealth_latency_degraded_ms: 400,
@@ -331,6 +477,11 @@ impl NetToolsConfig {
         self
     }
 
+    pub fn neighbours(mut self, neighbours: bool) -> Self {
+        self.neighbours = neighbours;
+        self
+    }
+
     pub fn nethealth_window(mut self, nethealth_window: usize) -> Self {
         self.nethealth_window = nethealth_window.max(1);
         self
@@ -358,12 +509,14 @@ pub struct NetTools {
     route_backend: Arc<dyn RouteBackend>,
     nethealth_backend: Arc<dyn NetHealthBackend>,
     socket_backend: Arc<dyn SocketBackend>,
+    neighbour_backend: Arc<dyn NeighbourBackend>,
     last_hostname: Option<String>,
     last_routes: HashMap<RouteKey, events::RouteEntry>,
     nethealth_targets: Vec<events::NetHealthTarget>,
     nethealth_samples: VecDeque<NetHealthSample>,
     last_nethealth: Option<events::NetHealthState>,
     last_sockets: HashSet<events::SocketEntry>,
+    last_neighbours: HashMap<String, events::NeighbourEntry>,
 }
 
 impl Default for NetTools {
@@ -380,12 +533,14 @@ impl NetTools {
             route_backend: Arc::new(LiveRouteBackend),
             nethealth_backend: Arc::new(LiveNetHealthBackend),
             socket_backend: Arc::new(LiveSocketBackend),
+            neighbour_backend: Arc::new(LiveNeighbourBackend),
             last_hostname: None,
             last_routes: HashMap::new(),
             nethealth_targets: Vec::new(),
             nethealth_samples: VecDeque::new(),
             last_nethealth: None,
             last_sockets: HashSet::new(),
+            last_neighbours: HashMap::new(),
         }
     }
 
@@ -417,6 +572,13 @@ impl NetTools {
         self.socket_backend = Arc::new(backend);
     }
 
+    pub fn set_neighbour_backend<B>(&mut self, backend: B)
+    where
+        B: NeighbourBackend + 'static,
+    {
+        self.neighbour_backend = Arc::new(backend);
+    }
+
     pub fn add_nethealth_target<S>(&mut self, host: S, port: u16)
     where
         S: Into<String>,
@@ -441,6 +603,10 @@ impl NetTools {
 
     fn poll_sockets(&self) -> io::Result<HashSet<events::SocketEntry>> {
         self.socket_backend.list()
+    }
+
+    fn poll_neighbours(&self) -> io::Result<HashMap<String, events::NeighbourEntry>> {
+        self.neighbour_backend.list()
     }
 
     fn store_hostname(&mut self, hostname: String) {
@@ -599,6 +765,53 @@ impl NetTools {
         self.last_sockets = current_sockets;
     }
 
+    async fn handle_neighbour_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
+        let current_neighbours = match self.poll_neighbours() {
+            Ok(current_neighbours) => current_neighbours,
+            Err(err) => {
+                log::error!("nettools: failed to read neighbours: {err}");
+                return;
+            }
+        };
+
+        for (address, current_neighbour) in &current_neighbours {
+            if let Some(previous_neighbour) = self.last_neighbours.get(address) {
+                if previous_neighbour != current_neighbour {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::NeighbourChanged {
+                            old: previous_neighbour.clone(),
+                            new: current_neighbour.clone(),
+                        },
+                    )
+                    .await;
+                }
+            } else {
+                Self::fire(
+                    hub,
+                    NetToolsEvent::NeighbourAdded {
+                        neighbour: current_neighbour.clone(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        for (address, previous_neighbour) in &self.last_neighbours {
+            if !current_neighbours.contains_key(address) {
+                Self::fire(
+                    hub,
+                    NetToolsEvent::NeighbourRemoved {
+                        neighbour: previous_neighbour.clone(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        self.last_neighbours = current_neighbours;
+    }
+
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
         let current_hostname = match self.poll_hostname() {
             Ok(current_hostname) => current_hostname,
@@ -708,6 +921,10 @@ impl NetTools {
             self.last_sockets = self.poll_sockets().unwrap_or_default();
         }
 
+        if self.cfg.neighbours {
+            self.last_neighbours = self.poll_neighbours().unwrap_or_default();
+        }
+
         let mut ticker = tokio::time::interval(self.cfg.get_pulse());
 
         loop {
@@ -728,6 +945,10 @@ impl NetTools {
 
                     if self.cfg.sockets {
                         self.handle_socket_poll(&ctx.hub).await;
+                    }
+
+                    if self.cfg.neighbours {
+                        self.handle_neighbour_poll(&ctx.hub).await;
                     }
                 },
             }

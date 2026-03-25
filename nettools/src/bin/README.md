@@ -26,6 +26,12 @@ Available demos
 - `nettools-sockets`
   - Watches live sockets, listeners, and connections.
   - Prints events when sockets appear or disappear.
+  - Supports both IPv4 and IPv6 sockets.
+
+- `nettools-neighbours`
+  - Watches ARP and neighbour-table entries.
+  - Prints events when neighbours are added, removed, or changed.
+  - Supports IPv4 ARP entries and IPv6 neighbour entries when the host exposes them.
 
 How to run
 
@@ -57,6 +63,12 @@ Run the sockets demo:
 
 ```bash
 cargo run -p nettools --bin nettools-sockets
+```
+
+Run the neighbours demo:
+
+```bash
+cargo run -p nettools --bin nettools-neighbours
 ```
 
 What to expect
@@ -292,6 +304,12 @@ Open a client connection with `nc`:
 nc 127.0.0.1 8080
 ```
 
+Open an IPv6 listener with `nc`:
+
+```bash
+nc -6 -l ::1 8080
+```
+
 Open a listener with Python if `nc` is not available:
 
 ```bash
@@ -302,6 +320,44 @@ Inspect what your system already exposes:
 
 ```bash
 ss -lntup
+```
+
+`nettools-neighbours`
+
+- Start the binary.
+- Cause ARP or neighbour discovery in another shell.
+- The demo prints lines such as:
+
+```text
+neighbour added: 192.168.1.10 lladdr aa:bb:cc:dd:ee:ff dev eth0 state=0x2
+neighbour changed: 192.168.1.10 lladdr aa:bb:cc:dd:ee:ff dev eth0 -> lladdr 11:22:33:44:55:66 dev wlan0
+```
+
+Examples for neighbour changes
+
+Populate ARP or neighbour cache by probing a host:
+
+```bash
+ping -c 1 192.168.1.10
+```
+
+Populate an IPv6 neighbour entry:
+
+```bash
+ping6 -c 1 fe80::1%eth0
+```
+
+Show current neighbour entries with common tools if present:
+
+```bash
+ip neigh
+arp -an
+```
+
+Delete an entry to force re-learning:
+
+```bash
+sudo ip neigh del 192.168.1.10 dev eth0
 ```
 
 Notes
