@@ -950,11 +950,9 @@ impl NetTools {
         };
         let previous_default_route = self.cfg.default_routes.then(|| Self::default_route(&self.last_routes)).flatten();
         let current_default_route = self.cfg.default_routes.then(|| Self::default_route(&current_routes)).flatten();
-        let current_route_lookups = self
+        let current_route_lookups = if self
             .cfg
-            .route_lookups
-            .then(|| Self::route_lookup_map(&current_routes, &self.route_lookup_targets))
-            .unwrap_or_default();
+            .route_lookups { Self::route_lookup_map(&current_routes, &self.route_lookup_targets) } else { Default::default() };
 
         if self.cfg.routes {
             for (route_key, current_route) in &current_routes {
