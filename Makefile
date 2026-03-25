@@ -1,7 +1,11 @@
 .ONESHELL:
 .DEFAULT_GOAL := build
 
-.PHONY: build check fix test
+.PHONY: setup build check fix test
+
+setup:
+	rustup component add clippy
+	cargo install cargo-nextest --locked
 
 build:
 	cargo build --workspace
