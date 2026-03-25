@@ -1,8 +1,9 @@
 use crate::{
     HostnameBackend, NeighbourBackend, NetHealthBackend, NetTools, NetToolsConfig, RouteBackend, SocketBackend,
+    ThroughputBackend,
     events::{
-        NetHealthLevel, NetHealthTarget, NetToolsEvent, NeighbourEntry, RouteEntry, RouteFamily, SocketEntry,
-        SocketKind,
+        InterfaceCounters, NetHealthLevel, NetHealthTarget, NetToolsEvent, NeighbourEntry, RouteEntry, RouteFamily,
+        SocketEntry, SocketKind,
     },
 };
 use async_trait::async_trait;
@@ -78,6 +79,31 @@ struct SequenceSocketBackend {
 struct SequenceNeighbourBackend {
     values: Mutex<VecDeque<io::Result<HashMap<String, NeighbourEntry>>>>,
     last: Mutex<Option<HashMap<String, NeighbourEntry>>>,
+}
+
+struct SequenceThroughputBackend {
+    values: Mutex<VecDeque<io::Result<HashMap<String, InterfaceCounters>>>>,
+    last: Mutex<Option<HashMap<String, InterfaceCounters>>>,
+}
+
+impl SequenceThroughputBackend {
+    fn new(values: Vec<io::Result<HashMap<String, InterfaceCounters>>>) -> Self {
+        Self { values: Mutex::new(values.into()), last: Mutex::new(None) }
+    }
+}
+
+impl ThroughputBackend for SequenceThroughputBackend {
+    fn list(&self) -> io::Result<HashMap<String, InterfaceCounters>> {
+        if let Some(value) = self.values.lock().unwrap().pop_front() {
+            if let Ok(counters) = &value {
+                *self.last.lock().unwrap() = Some(counters.clone());
+            }
+
+            return value;
+        }
+
+        Ok(self.last.lock().unwrap().clone().unwrap_or_default())
+    }
 }
 
 impl SequenceNeighbourBackend {
@@ -199,6 +225,9 @@ impl Callback<NetToolsEvent> for JsonCb {
             NetToolsEvent::RouteLookupChanged { old, new } => {
                 Some(serde_json::json!({ "event": "route_lookup_changed", "old": old, "new": new }))
             }
+            NetToolsEvent::ThroughputUpdated { sample } => {
+                Some(serde_json::json!({ "event": "throughput_updated", "sample": sample }))
+            }
         }
     }
 }
@@ -228,6 +257,26 @@ fn neighbour(address: &str, mac: &str, iface: &str, state: Option<&str>) -> Neig
         mac: mac.to_string(),
         iface: iface.to_string(),
         state: state.map(str::to_string),
+    }
+}
+
+fn counters(
+    iface: &str,
+    rx_bytes: u64,
+    rx_packets: u64,
+    tx_bytes: u64,
+    tx_packets: u64,
+) -> InterfaceCounters {
+    InterfaceCounters {
+        iface: iface.to_string(),
+        rx_bytes,
+        rx_packets,
+        rx_errors: 0,
+        rx_drops: 0,
+        tx_bytes,
+        tx_packets,
+        tx_errors: 0,
+        tx_drops: 0,
     }
 }
 
@@ -774,4 +823,38 @@ async fn emits_route_lookup_changed_event_for_ipv6() {
     assert_eq!(event["event"], "route_lookup_changed");
     assert_eq!(event["old"]["route"]["gateway"], "fe80::1");
     assert_eq!(event["new"]["route"]["gateway"], "fe80::2");
+}
+
+#[tokio::test]
+async fn emits_throughput_updated_event() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(20))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .throughput(true),
+        ),
+    );
+    sensor.set_throughput_backend(SequenceThroughputBackend::new(vec![
+        Ok(HashMap::from([("eth0".to_string(), counters("eth0", 1000, 10, 2000, 20))])),
+        Ok(HashMap::from([("eth0".to_string(), counters("eth0", 1600, 16, 2600, 26))])),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "throughput_updated");
+    assert_eq!(event["sample"]["iface"], "eth0");
+    assert!(event["sample"]["rx_bytes_per_sec"].as_u64().unwrap() > 0);
+    assert!(event["sample"]["tx_bytes_per_sec"].as_u64().unwrap() > 0);
 }

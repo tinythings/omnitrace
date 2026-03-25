@@ -38,6 +38,10 @@ Available demos
   - Prints events when the chosen route changes.
   - Supports both IPv4 and IPv6 targets.
 
+- `nettools-throughput`
+  - Watches interface counters and calculates byte and packet rates.
+  - Prints events when interface throughput changes.
+
 How to run
 
 Run the hostname demo:
@@ -80,6 +84,12 @@ Run the route lookup demo:
 
 ```bash
 cargo run -p nettools --bin nettools-route-lookup -- 8.8.8.8 2001:4860:4860::8888
+```
+
+Run the throughput demo:
+
+```bash
+cargo run -p nettools --bin nettools-throughput
 ```
 
 What to expect
@@ -396,6 +406,31 @@ BSD:
 ```bash
 sudo route add default 10.0.0.254
 sudo route add -inet6 default fe80::2
+```
+
+`nettools-throughput`
+
+- Start the binary.
+- Generate interface traffic in another shell.
+- The demo prints lines such as:
+
+```text
+throughput: eth0 rx=1048576B/s tx=65536B/s rx_pps=800 tx_pps=120
+```
+
+Examples for traffic generation
+
+Download something:
+
+```bash
+curl -L https://example.com/ -o /dev/null
+```
+
+Send ICMP traffic:
+
+```bash
+ping -c 20 1.1.1.1
+ping6 -c 20 2606:4700:4700::1111
 ```
 
 Notes

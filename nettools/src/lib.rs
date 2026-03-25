@@ -42,11 +42,16 @@ pub trait NeighbourBackend: Send + Sync {
     fn list(&self) -> io::Result<HashMap<String, events::NeighbourEntry>>;
 }
 
+pub trait ThroughputBackend: Send + Sync {
+    fn list(&self) -> io::Result<HashMap<String, events::InterfaceCounters>>;
+}
+
 pub struct LiveHostnameBackend;
 pub struct LiveRouteBackend;
 pub struct LiveNetHealthBackend;
 pub struct LiveSocketBackend;
 pub struct LiveNeighbourBackend;
+pub struct LiveThroughputBackend;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RouteKey {
@@ -64,6 +69,12 @@ struct NetHealthSample {
     total_probes: usize,
     successful_probes: usize,
     latency_sum_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ThroughputState {
+    at: Instant,
+    counters: HashMap<String, events::InterfaceCounters>,
 }
 
 impl LiveHostnameBackend {
@@ -399,6 +410,84 @@ impl NeighbourBackend for LiveNeighbourBackend {
     }
 }
 
+impl LiveThroughputBackend {
+    fn parse_proc_net_dev_line(line: &str) -> Option<events::InterfaceCounters> {
+        line.split_once(':').and_then(|(iface, stats)| {
+            stats
+                .split_whitespace()
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .filter(|values| values.len() >= 16)
+                .map(|values| events::InterfaceCounters {
+                    iface: iface.trim().to_string(),
+                    rx_bytes: values[0],
+                    rx_packets: values[1],
+                    rx_errors: values[2],
+                    rx_drops: values[3],
+                    tx_bytes: values[8],
+                    tx_packets: values[9],
+                    tx_errors: values[10],
+                    tx_drops: values[11],
+                })
+        })
+    }
+
+    fn parse_proc_net_dev(content: &str) -> HashMap<String, events::InterfaceCounters> {
+        content
+            .lines()
+            .skip(2)
+            .filter_map(Self::parse_proc_net_dev_line)
+            .map(|counters| (counters.iface.clone(), counters))
+            .collect()
+    }
+
+    fn parse_netstat_ib_line(line: &str) -> Option<events::InterfaceCounters> {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        (fields.len() >= 10)
+            .then(|| events::InterfaceCounters {
+                iface: fields[0].to_string(),
+                rx_packets: fields.iter().rev().nth(3).and_then(|v| v.parse().ok()).unwrap_or(0),
+                rx_errors: 0,
+                rx_drops: 0,
+                tx_packets: fields.iter().rev().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0),
+                tx_errors: 0,
+                tx_drops: 0,
+                rx_bytes: fields.iter().rev().nth(2).and_then(|v| v.parse().ok()).unwrap_or(0),
+                tx_bytes: fields.last().and_then(|v| v.parse().ok()).unwrap_or(0),
+            })
+            .filter(|counters| !matches!(counters.iface.as_str(), "Name" | "Iface"))
+    }
+
+    fn parse_netstat_ib(content: &str) -> HashMap<String, events::InterfaceCounters> {
+        content
+            .lines()
+            .filter_map(Self::parse_netstat_ib_line)
+            .map(|counters| (counters.iface.clone(), counters))
+            .collect()
+    }
+}
+
+impl ThroughputBackend for LiveThroughputBackend {
+    fn list(&self) -> io::Result<HashMap<String, events::InterfaceCounters>> {
+        std::fs::read_to_string("/proc/net/dev")
+            .map(|content| Self::parse_proc_net_dev(&content))
+            .or_else(|_| {
+                Command::new("netstat")
+                    .args(["-ibn"])
+                    .output()
+                    .map_err(io::Error::other)
+                    .and_then(|output| {
+                        if output.status.success() {
+                            Ok(Self::parse_netstat_ib(&String::from_utf8_lossy(&output.stdout)))
+                        } else {
+                            Err(io::Error::other(String::from_utf8_lossy(&output.stderr).to_string()))
+                        }
+                    })
+            })
+    }
+}
+
 #[async_trait]
 impl NetHealthBackend for LiveNetHealthBackend {
     async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration> {
@@ -424,6 +513,7 @@ pub struct NetToolsConfig {
     sockets: bool,
     neighbours: bool,
     route_lookups: bool,
+    throughput: bool,
     nethealth_window: usize,
     nethealth_timeout: Duration,
     nethealth_latency_degraded_ms: u64,
@@ -441,6 +531,7 @@ impl Default for NetToolsConfig {
             sockets: false,
             neighbours: false,
             route_lookups: false,
+            throughput: false,
             nethealth_window: 4,
             nethealth_timeout: Duration::from_secs(2),
             nethealth_latency_degraded_ms: 400,
@@ -494,6 +585,11 @@ impl NetToolsConfig {
         self
     }
 
+    pub fn throughput(mut self, throughput: bool) -> Self {
+        self.throughput = throughput;
+        self
+    }
+
     pub fn nethealth_window(mut self, nethealth_window: usize) -> Self {
         self.nethealth_window = nethealth_window.max(1);
         self
@@ -522,6 +618,7 @@ pub struct NetTools {
     nethealth_backend: Arc<dyn NetHealthBackend>,
     socket_backend: Arc<dyn SocketBackend>,
     neighbour_backend: Arc<dyn NeighbourBackend>,
+    throughput_backend: Arc<dyn ThroughputBackend>,
     last_hostname: Option<String>,
     last_routes: HashMap<RouteKey, events::RouteEntry>,
     nethealth_targets: Vec<events::NetHealthTarget>,
@@ -531,6 +628,7 @@ pub struct NetTools {
     last_neighbours: HashMap<String, events::NeighbourEntry>,
     route_lookup_targets: Vec<String>,
     last_route_lookups: HashMap<RouteLookupKey, events::RouteLookupEntry>,
+    last_throughput: Option<ThroughputState>,
 }
 
 impl Default for NetTools {
@@ -548,6 +646,7 @@ impl NetTools {
             nethealth_backend: Arc::new(LiveNetHealthBackend),
             socket_backend: Arc::new(LiveSocketBackend),
             neighbour_backend: Arc::new(LiveNeighbourBackend),
+            throughput_backend: Arc::new(LiveThroughputBackend),
             last_hostname: None,
             last_routes: HashMap::new(),
             nethealth_targets: Vec::new(),
@@ -557,6 +656,7 @@ impl NetTools {
             last_neighbours: HashMap::new(),
             route_lookup_targets: Vec::new(),
             last_route_lookups: HashMap::new(),
+            last_throughput: None,
         }
     }
 
@@ -595,6 +695,13 @@ impl NetTools {
         self.neighbour_backend = Arc::new(backend);
     }
 
+    pub fn set_throughput_backend<B>(&mut self, backend: B)
+    where
+        B: ThroughputBackend + 'static,
+    {
+        self.throughput_backend = Arc::new(backend);
+    }
+
     pub fn add_nethealth_target<S>(&mut self, host: S, port: u16)
     where
         S: Into<String>,
@@ -630,6 +737,10 @@ impl NetTools {
 
     fn poll_neighbours(&self) -> io::Result<HashMap<String, events::NeighbourEntry>> {
         self.neighbour_backend.list()
+    }
+
+    fn poll_throughput(&self) -> io::Result<HashMap<String, events::InterfaceCounters>> {
+        self.throughput_backend.list()
     }
 
     fn store_hostname(&mut self, hostname: String) {
@@ -742,6 +853,38 @@ impl NetTools {
         while self.nethealth_samples.len() > self.cfg.nethealth_window {
             self.nethealth_samples.pop_front();
         }
+    }
+
+    fn throughput_sample(
+        previous: &events::InterfaceCounters,
+        current: &events::InterfaceCounters,
+        interval: Duration,
+    ) -> Option<events::ThroughputSample> {
+        (interval.as_millis() > 0).then(|| events::ThroughputSample {
+            iface: current.iface.clone(),
+            interval_ms: interval.as_millis() as u64,
+            rx_bytes_per_sec: current
+                .rx_bytes
+                .saturating_sub(previous.rx_bytes)
+                .saturating_mul(1000)
+                / interval.as_millis() as u64,
+            tx_bytes_per_sec: current
+                .tx_bytes
+                .saturating_sub(previous.tx_bytes)
+                .saturating_mul(1000)
+                / interval.as_millis() as u64,
+            rx_packets_per_sec: current
+                .rx_packets
+                .saturating_sub(previous.rx_packets)
+                .saturating_mul(1000)
+                / interval.as_millis() as u64,
+            tx_packets_per_sec: current
+                .tx_packets
+                .saturating_sub(previous.tx_packets)
+                .saturating_mul(1000)
+                / interval.as_millis() as u64,
+            counters: current.clone(),
+        })
     }
 
     fn nethealth_state(&self) -> Option<events::NetHealthState> {
@@ -918,6 +1061,41 @@ impl NetTools {
         self.last_neighbours = current_neighbours;
     }
 
+    async fn handle_throughput_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
+        let current_state = match self.poll_throughput() {
+            Ok(counters) => ThroughputState {
+                at: Instant::now(),
+                counters,
+            },
+            Err(err) => {
+                log::error!("nettools: failed to read interface counters: {err}");
+                return;
+            }
+        };
+
+        if let Some(previous_state) = self.last_throughput.as_ref() {
+            for sample in current_state
+                .counters
+                .iter()
+                .filter_map(|(iface, current)| {
+                    previous_state.counters.get(iface).and_then(|previous| {
+                        Self::throughput_sample(previous, current, current_state.at.saturating_duration_since(previous_state.at))
+                    })
+                })
+                .filter(|sample| {
+                    sample.rx_bytes_per_sec > 0
+                        || sample.tx_bytes_per_sec > 0
+                        || sample.rx_packets_per_sec > 0
+                        || sample.tx_packets_per_sec > 0
+                })
+            {
+                Self::fire(hub, NetToolsEvent::ThroughputUpdated { sample }).await;
+            }
+        }
+
+        self.last_throughput = Some(current_state);
+    }
+
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
         let current_hostname = match self.poll_hostname() {
             Ok(current_hostname) => current_hostname,
@@ -1073,6 +1251,13 @@ impl NetTools {
             self.last_neighbours = self.poll_neighbours().unwrap_or_default();
         }
 
+        if self.cfg.throughput {
+            self.last_throughput = self.poll_throughput().ok().map(|counters| ThroughputState {
+                at: Instant::now(),
+                counters,
+            });
+        }
+
         let mut ticker = tokio::time::interval(self.cfg.get_pulse());
 
         loop {
@@ -1097,6 +1282,10 @@ impl NetTools {
 
                     if self.cfg.neighbours {
                         self.handle_neighbour_poll(&ctx.hub).await;
+                    }
+
+                    if self.cfg.throughput {
+                        self.handle_throughput_poll(&ctx.hub).await;
                     }
                 },
             }

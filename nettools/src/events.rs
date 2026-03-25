@@ -67,6 +67,30 @@ pub struct RouteLookupEntry {
     pub route: RouteEntry,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterfaceCounters {
+    pub iface: String,
+    pub rx_bytes: u64,
+    pub rx_packets: u64,
+    pub rx_errors: u64,
+    pub rx_drops: u64,
+    pub tx_bytes: u64,
+    pub tx_packets: u64,
+    pub tx_errors: u64,
+    pub tx_drops: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThroughputSample {
+    pub iface: String,
+    pub interval_ms: u64,
+    pub rx_bytes_per_sec: u64,
+    pub tx_bytes_per_sec: u64,
+    pub rx_packets_per_sec: u64,
+    pub tx_packets_per_sec: u64,
+    pub counters: InterfaceCounters,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetToolsEvent {
     HostnameChanged { old: String, new: String },
@@ -85,6 +109,7 @@ pub enum NetToolsEvent {
     RouteLookupAdded { lookup: RouteLookupEntry },
     RouteLookupRemoved { lookup: RouteLookupEntry },
     RouteLookupChanged { old: RouteLookupEntry, new: RouteLookupEntry },
+    ThroughputUpdated { sample: ThroughputSample },
 }
 
 bitflags! {
@@ -106,6 +131,7 @@ bitflags! {
         const ROUTE_LOOKUP_ADDED    = 0b10000000000000;
         const ROUTE_LOOKUP_REMOVED  = 0b100000000000000;
         const ROUTE_LOOKUP_CHANGED  = 0b1000000000000000;
+        const THROUGHPUT_UPDATED    = 0b10000000000000000;
     }
 }
 
@@ -128,6 +154,7 @@ impl NetToolsEvent {
             NetToolsEvent::RouteLookupAdded { .. } => NetToolsMask::ROUTE_LOOKUP_ADDED,
             NetToolsEvent::RouteLookupRemoved { .. } => NetToolsMask::ROUTE_LOOKUP_REMOVED,
             NetToolsEvent::RouteLookupChanged { .. } => NetToolsMask::ROUTE_LOOKUP_CHANGED,
+            NetToolsEvent::ThroughputUpdated { .. } => NetToolsMask::THROUGHPUT_UPDATED,
         }
     }
 }
