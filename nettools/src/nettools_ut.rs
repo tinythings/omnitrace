@@ -1,9 +1,9 @@
 use crate::{
     HostnameBackend, NeighbourBackend, NetHealthBackend, NetTools, NetToolsConfig, RouteBackend, SocketBackend,
-    ThroughputBackend,
+    ThroughputBackend, WifiBackend,
     events::{
         InterfaceCounters, NetHealthLevel, NetHealthTarget, NetToolsEvent, NeighbourEntry, RouteEntry, RouteFamily,
-        SocketEntry, SocketKind,
+        SocketEntry, SocketKind, WifiDetails,
     },
 };
 use async_trait::async_trait;
@@ -84,6 +84,31 @@ struct SequenceNeighbourBackend {
 struct SequenceThroughputBackend {
     values: Mutex<VecDeque<io::Result<HashMap<String, InterfaceCounters>>>>,
     last: Mutex<Option<HashMap<String, InterfaceCounters>>>,
+}
+
+struct SequenceWifiBackend {
+    values: Mutex<VecDeque<io::Result<HashMap<String, WifiDetails>>>>,
+    last: Mutex<Option<HashMap<String, WifiDetails>>>,
+}
+
+impl SequenceWifiBackend {
+    fn new(values: Vec<io::Result<HashMap<String, WifiDetails>>>) -> Self {
+        Self { values: Mutex::new(values.into()), last: Mutex::new(None) }
+    }
+}
+
+impl WifiBackend for SequenceWifiBackend {
+    fn list(&self) -> io::Result<HashMap<String, WifiDetails>> {
+        if let Some(value) = self.values.lock().unwrap().pop_front() {
+            if let Ok(wifi) = &value {
+                *self.last.lock().unwrap() = Some(wifi.clone());
+            }
+
+            return value;
+        }
+
+        Ok(self.last.lock().unwrap().clone().unwrap_or_default())
+    }
 }
 
 impl SequenceThroughputBackend {
@@ -228,6 +253,15 @@ impl Callback<NetToolsEvent> for JsonCb {
             NetToolsEvent::ThroughputUpdated { sample } => {
                 Some(serde_json::json!({ "event": "throughput_updated", "sample": sample }))
             }
+            NetToolsEvent::WifiAdded { wifi } => {
+                Some(serde_json::json!({ "event": "wifi_added", "wifi": wifi }))
+            }
+            NetToolsEvent::WifiRemoved { wifi } => {
+                Some(serde_json::json!({ "event": "wifi_removed", "wifi": wifi }))
+            }
+            NetToolsEvent::WifiChanged { old, new } => {
+                Some(serde_json::json!({ "event": "wifi_changed", "old": old, "new": new }))
+            }
         }
     }
 }
@@ -277,6 +311,18 @@ fn counters(
         tx_packets,
         tx_errors: 0,
         tx_drops: 0,
+    }
+}
+
+fn wifi(iface: &str, link_quality: f32, signal_level_dbm: f32, noise_level_dbm: f32) -> WifiDetails {
+    WifiDetails {
+        iface: iface.to_string(),
+        connected: true,
+        link_quality,
+        signal_level_dbm,
+        noise_level_dbm,
+        ssid: None,
+        bssid: None,
     }
 }
 
@@ -857,4 +903,37 @@ async fn emits_throughput_updated_event() {
     assert_eq!(event["sample"]["iface"], "eth0");
     assert!(event["sample"]["rx_bytes_per_sec"].as_u64().unwrap() > 0);
     assert!(event["sample"]["tx_bytes_per_sec"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn emits_wifi_changed_event() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .wifi(true),
+        ),
+    );
+    sensor.set_wifi_backend(SequenceWifiBackend::new(vec![
+        Ok(HashMap::from([("wlan0".to_string(), wifi("wlan0", 42.0, -61.0, -95.0))])),
+        Ok(HashMap::from([("wlan0".to_string(), wifi("wlan0", 28.0, -77.0, -96.0))])),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "wifi_changed");
+    assert_eq!(event["old"]["iface"], "wlan0");
+    assert_eq!(event["new"]["signal_level_dbm"], -77.0);
 }

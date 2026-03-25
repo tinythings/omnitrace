@@ -46,12 +46,17 @@ pub trait ThroughputBackend: Send + Sync {
     fn list(&self) -> io::Result<HashMap<String, events::InterfaceCounters>>;
 }
 
+pub trait WifiBackend: Send + Sync {
+    fn list(&self) -> io::Result<HashMap<String, events::WifiDetails>>;
+}
+
 pub struct LiveHostnameBackend;
 pub struct LiveRouteBackend;
 pub struct LiveNetHealthBackend;
 pub struct LiveSocketBackend;
 pub struct LiveNeighbourBackend;
 pub struct LiveThroughputBackend;
+pub struct LiveWifiBackend;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RouteKey {
@@ -488,6 +493,87 @@ impl ThroughputBackend for LiveThroughputBackend {
     }
 }
 
+impl LiveWifiBackend {
+    fn parse_wireless_float(value: &str) -> f32 {
+        value.trim_end_matches('.').parse::<f32>().unwrap_or(0.0)
+    }
+
+    fn parse_wireless_line(line: &str) -> Option<events::WifiDetails> {
+        line.split_once(':').and_then(|(iface, stats)| {
+            let fields = stats.split_whitespace().collect::<Vec<_>>();
+            (fields.len() >= 4).then(|| events::WifiDetails {
+                iface: iface.trim().to_string(),
+                connected: fields[0] != "0000",
+                link_quality: Self::parse_wireless_float(fields[1]),
+                signal_level_dbm: Self::parse_wireless_float(fields[2]),
+                noise_level_dbm: Self::parse_wireless_float(fields[3]),
+                ssid: None,
+                bssid: None,
+            })
+        })
+    }
+
+    fn enrich_from_iw_command(iface: &str, wifi: &mut events::WifiDetails) {
+        let iw_output = ["/usr/sbin/iw", "/usr/bin/iw"]
+            .iter()
+            .find_map(|path| {
+                std::path::Path::new(path)
+                    .exists()
+                    .then(|| Command::new(path).args(["dev", iface, "link"]).output().ok())
+                    .flatten()
+            });
+
+        if let Some(output) = iw_output {
+            let text = String::from_utf8_lossy(&output.stdout);
+
+            if text.lines().any(|line| line.trim() == "Not connected.") {
+                wifi.connected = false;
+                wifi.ssid = None;
+                wifi.bssid = None;
+                return;
+            }
+
+            text.lines().for_each(|line| {
+                let trimmed = line.trim();
+
+                if let Some(bssid) = trimmed.strip_prefix("Connected to ") {
+                    wifi.bssid = bssid
+                        .split_whitespace()
+                        .next()
+                        .map(str::to_string);
+                } else if let Some(ssid) = trimmed.strip_prefix("SSID: ") {
+                    wifi.ssid = Some(ssid.to_string());
+                } else if let Some(signal) = trimmed.strip_prefix("signal: ") {
+                    wifi.signal_level_dbm = signal
+                        .split_whitespace()
+                        .next()
+                        .and_then(|value| value.parse::<f32>().ok())
+                        .unwrap_or(wifi.signal_level_dbm);
+                }
+            });
+        }
+    }
+
+    fn parse_proc_net_wireless(content: &str) -> HashMap<String, events::WifiDetails> {
+        content
+            .lines()
+            .skip(2)
+            .filter_map(Self::parse_wireless_line)
+            .map(|mut wifi| {
+                let iface = wifi.iface.clone();
+                Self::enrich_from_iw_command(&iface, &mut wifi);
+                (iface, wifi)
+            })
+            .collect()
+    }
+}
+
+impl WifiBackend for LiveWifiBackend {
+    fn list(&self) -> io::Result<HashMap<String, events::WifiDetails>> {
+        std::fs::read_to_string("/proc/net/wireless").map(|content| Self::parse_proc_net_wireless(&content))
+    }
+}
+
 #[async_trait]
 impl NetHealthBackend for LiveNetHealthBackend {
     async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration> {
@@ -514,6 +600,7 @@ pub struct NetToolsConfig {
     neighbours: bool,
     route_lookups: bool,
     throughput: bool,
+    wifi: bool,
     nethealth_window: usize,
     nethealth_timeout: Duration,
     nethealth_latency_degraded_ms: u64,
@@ -532,6 +619,7 @@ impl Default for NetToolsConfig {
             neighbours: false,
             route_lookups: false,
             throughput: false,
+            wifi: false,
             nethealth_window: 4,
             nethealth_timeout: Duration::from_secs(2),
             nethealth_latency_degraded_ms: 400,
@@ -590,6 +678,11 @@ impl NetToolsConfig {
         self
     }
 
+    pub fn wifi(mut self, wifi: bool) -> Self {
+        self.wifi = wifi;
+        self
+    }
+
     pub fn nethealth_window(mut self, nethealth_window: usize) -> Self {
         self.nethealth_window = nethealth_window.max(1);
         self
@@ -619,6 +712,7 @@ pub struct NetTools {
     socket_backend: Arc<dyn SocketBackend>,
     neighbour_backend: Arc<dyn NeighbourBackend>,
     throughput_backend: Arc<dyn ThroughputBackend>,
+    wifi_backend: Arc<dyn WifiBackend>,
     last_hostname: Option<String>,
     last_routes: HashMap<RouteKey, events::RouteEntry>,
     nethealth_targets: Vec<events::NetHealthTarget>,
@@ -629,6 +723,7 @@ pub struct NetTools {
     route_lookup_targets: Vec<String>,
     last_route_lookups: HashMap<RouteLookupKey, events::RouteLookupEntry>,
     last_throughput: Option<ThroughputState>,
+    last_wifi: HashMap<String, events::WifiDetails>,
 }
 
 impl Default for NetTools {
@@ -647,6 +742,7 @@ impl NetTools {
             socket_backend: Arc::new(LiveSocketBackend),
             neighbour_backend: Arc::new(LiveNeighbourBackend),
             throughput_backend: Arc::new(LiveThroughputBackend),
+            wifi_backend: Arc::new(LiveWifiBackend),
             last_hostname: None,
             last_routes: HashMap::new(),
             nethealth_targets: Vec::new(),
@@ -657,6 +753,7 @@ impl NetTools {
             route_lookup_targets: Vec::new(),
             last_route_lookups: HashMap::new(),
             last_throughput: None,
+            last_wifi: HashMap::new(),
         }
     }
 
@@ -702,6 +799,13 @@ impl NetTools {
         self.throughput_backend = Arc::new(backend);
     }
 
+    pub fn set_wifi_backend<B>(&mut self, backend: B)
+    where
+        B: WifiBackend + 'static,
+    {
+        self.wifi_backend = Arc::new(backend);
+    }
+
     pub fn add_nethealth_target<S>(&mut self, host: S, port: u16)
     where
         S: Into<String>,
@@ -741,6 +845,10 @@ impl NetTools {
 
     fn poll_throughput(&self) -> io::Result<HashMap<String, events::InterfaceCounters>> {
         self.throughput_backend.list()
+    }
+
+    fn poll_wifi(&self) -> io::Result<HashMap<String, events::WifiDetails>> {
+        self.wifi_backend.list()
     }
 
     fn store_hostname(&mut self, hostname: String) {
@@ -1096,6 +1204,41 @@ impl NetTools {
         self.last_throughput = Some(current_state);
     }
 
+    async fn handle_wifi_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
+        let current_wifi = match self.poll_wifi() {
+            Ok(current_wifi) => current_wifi,
+            Err(err) => {
+                log::error!("nettools: failed to read wifi details: {err}");
+                return;
+            }
+        };
+
+        for (iface, current) in &current_wifi {
+            if let Some(previous) = self.last_wifi.get(iface) {
+                if previous != current {
+                    Self::fire(
+                        hub,
+                        NetToolsEvent::WifiChanged {
+                            old: previous.clone(),
+                            new: current.clone(),
+                        },
+                    )
+                    .await;
+                }
+            } else {
+                Self::fire(hub, NetToolsEvent::WifiAdded { wifi: current.clone() }).await;
+            }
+        }
+
+        for (iface, previous) in &self.last_wifi {
+            if !current_wifi.contains_key(iface) {
+                Self::fire(hub, NetToolsEvent::WifiRemoved { wifi: previous.clone() }).await;
+            }
+        }
+
+        self.last_wifi = current_wifi;
+    }
+
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
         let current_hostname = match self.poll_hostname() {
             Ok(current_hostname) => current_hostname,
@@ -1258,6 +1401,10 @@ impl NetTools {
             });
         }
 
+        if self.cfg.wifi {
+            self.last_wifi = self.poll_wifi().unwrap_or_default();
+        }
+
         let mut ticker = tokio::time::interval(self.cfg.get_pulse());
 
         loop {
@@ -1286,6 +1433,10 @@ impl NetTools {
 
                     if self.cfg.throughput {
                         self.handle_throughput_poll(&ctx.hub).await;
+                    }
+
+                    if self.cfg.wifi {
+                        self.handle_wifi_poll(&ctx.hub).await;
                     }
                 },
             }

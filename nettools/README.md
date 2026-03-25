@@ -22,6 +22,8 @@ Right now it can:
 - emit route lookup added, removed, and changed events
 - read interface counters and compute per-interface throughput
 - emit throughput update events when traffic changes
+- read live Wi-Fi link quality and radio levels where the host exposes them
+- emit Wi-Fi added, removed, and changed events
 - supports both IPv4 and IPv6 where the host exposes that data
 
 This crate is intended to hold things such as:
@@ -33,6 +35,7 @@ This crate is intended to hold things such as:
 - ARP and neighbour-table inspection
 - route lookup for specific destinations
 - interface counters and throughput
+- Wi-Fi quality and radio details
 - small low-level network helpers for minimal systems
 
 The goal is to keep these host-network identity features together, instead of
@@ -48,3 +51,4 @@ Example binaries:
 - `cargo run -p nettools --bin nettools-neighbours`
 - `cargo run -p nettools --bin nettools-route-lookup -- 8.8.8.8 2001:4860:4860::8888`
 - `cargo run -p nettools --bin nettools-throughput`
+- `cargo run -p nettools --bin nettools-wifi`

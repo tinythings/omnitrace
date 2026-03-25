@@ -49,3 +49,7 @@ path = "src/bin/nettools-route-lookup.rs"
 [[bin]]
 name = "nettools-throughput"
 path = "src/bin/nettools-throughput.rs"
+
+[[bin]]
+name = "nettools-wifi"
+path = "src/bin/nettools-wifi.rs"

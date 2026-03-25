@@ -91,6 +91,17 @@ pub struct ThroughputSample {
     pub counters: InterfaceCounters,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WifiDetails {
+    pub iface: String,
+    pub connected: bool,
+    pub link_quality: f32,
+    pub signal_level_dbm: f32,
+    pub noise_level_dbm: f32,
+    pub ssid: Option<String>,
+    pub bssid: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetToolsEvent {
     HostnameChanged { old: String, new: String },
@@ -110,6 +121,9 @@ pub enum NetToolsEvent {
     RouteLookupRemoved { lookup: RouteLookupEntry },
     RouteLookupChanged { old: RouteLookupEntry, new: RouteLookupEntry },
     ThroughputUpdated { sample: ThroughputSample },
+    WifiAdded { wifi: WifiDetails },
+    WifiRemoved { wifi: WifiDetails },
+    WifiChanged { old: WifiDetails, new: WifiDetails },
 }
 
 bitflags! {
@@ -132,6 +146,9 @@ bitflags! {
         const ROUTE_LOOKUP_REMOVED  = 0b100000000000000;
         const ROUTE_LOOKUP_CHANGED  = 0b1000000000000000;
         const THROUGHPUT_UPDATED    = 0b10000000000000000;
+        const WIFI_ADDED            = 0b100000000000000000;
+        const WIFI_REMOVED          = 0b1000000000000000000;
+        const WIFI_CHANGED          = 0b10000000000000000000;
     }
 }
 
@@ -155,6 +172,9 @@ impl NetToolsEvent {
             NetToolsEvent::RouteLookupRemoved { .. } => NetToolsMask::ROUTE_LOOKUP_REMOVED,
             NetToolsEvent::RouteLookupChanged { .. } => NetToolsMask::ROUTE_LOOKUP_CHANGED,
             NetToolsEvent::ThroughputUpdated { .. } => NetToolsMask::THROUGHPUT_UPDATED,
+            NetToolsEvent::WifiAdded { .. } => NetToolsMask::WIFI_ADDED,
+            NetToolsEvent::WifiRemoved { .. } => NetToolsMask::WIFI_REMOVED,
+            NetToolsEvent::WifiChanged { .. } => NetToolsMask::WIFI_CHANGED,
         }
     }
 }

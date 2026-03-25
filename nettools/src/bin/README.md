@@ -42,6 +42,10 @@ Available demos
   - Watches interface counters and calculates byte and packet rates.
   - Prints events when interface throughput changes.
 
+- `nettools-wifi`
+  - Watches live Wi-Fi quality and signal details.
+  - Prints events when Wi-Fi link state changes.
+
 How to run
 
 Run the hostname demo:
@@ -90,6 +94,12 @@ Run the throughput demo:
 
 ```bash
 cargo run -p nettools --bin nettools-throughput
+```
+
+Run the Wi-Fi demo:
+
+```bash
+cargo run -p nettools --bin nettools-wifi
 ```
 
 What to expect
@@ -431,6 +441,24 @@ Send ICMP traffic:
 ```bash
 ping -c 20 1.1.1.1
 ping6 -c 20 2606:4700:4700::1111
+```
+
+`nettools-wifi`
+
+- Start the binary.
+- Move around, roam, or disturb the radio link.
+- The demo prints lines such as:
+
+```text
+wifi changed: wlan0 quality=42 signal=-61dBm noise=-95dBm -> quality=28 signal=-77dBm noise=-96dBm
+```
+
+Examples for Wi-Fi disturbance
+
+Move farther from the access point, shield the antenna, or force a roam to another AP. On Linux you can also inspect the live state with:
+
+```bash
+cat /proc/net/wireless
 ```
 
 Notes
