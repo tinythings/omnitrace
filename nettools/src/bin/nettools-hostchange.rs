@@ -24,13 +24,14 @@ impl Callback<NetToolsEvent> for JsonCb {
                     "new": new,
                 }))
             }
+            _ => None,
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let sensor = NetTools::new(Some(NetToolsConfig::default().pulse(Duration::from_secs(2))));
+    let sensor = NetTools::new(Some(NetToolsConfig::default().pulse(Duration::from_secs(2)).hostname(true).routes(false)));
     let (tx, mut rx) = channel::<CallbackResult>(0xff);
 
     let mut hub = CallbackHub::<NetToolsEvent>::new();
