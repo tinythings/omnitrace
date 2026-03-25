@@ -10,7 +10,7 @@ use omnitrace_core::{
     sensor::{Sensor, SensorCtx},
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     io,
     net::ToSocketAddrs,
@@ -34,9 +34,14 @@ pub trait NetHealthBackend: Send + Sync {
     async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration>;
 }
 
+pub trait SocketBackend: Send + Sync {
+    fn list(&self) -> io::Result<HashSet<events::SocketEntry>>;
+}
+
 pub struct LiveHostnameBackend;
 pub struct LiveRouteBackend;
 pub struct LiveNetHealthBackend;
+pub struct LiveSocketBackend;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RouteKey {
@@ -147,6 +152,104 @@ impl RouteBackend for LiveRouteBackend {
     }
 }
 
+impl LiveSocketBackend {
+    fn hex_port(value: &str) -> Option<u16> {
+        u16::from_str_radix(value, 16).ok()
+    }
+
+    fn dec_ipv4(value: &str) -> Option<std::net::Ipv4Addr> {
+        let parsed = u32::from_str_radix(value, 16).ok()?;
+        Some(std::net::Ipv4Addr::from(u32::swap_bytes(parsed)))
+    }
+
+    fn dec_ipv6(value: &str) -> Option<std::net::Ipv6Addr> {
+        if value.len() != 32 {
+            return None;
+        }
+
+        (0..16)
+            .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok())
+            .collect::<Option<Vec<_>>>()
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+            .map(std::net::Ipv6Addr::from)
+    }
+
+    fn decode_addr(value: &str, v6: bool) -> Option<String> {
+        value
+            .split_once(':')
+            .and_then(|(ip_hex, port_hex)| Self::hex_port(port_hex).map(|port| (ip_hex, port)))
+            .and_then(|(ip_hex, port)| {
+                if v6 {
+                    Self::dec_ipv6(ip_hex).map(|ip| format!("{ip}:{port}"))
+                } else {
+                    Self::dec_ipv4(ip_hex).map(|ip| format!("{ip}:{port}"))
+                }
+            })
+    }
+
+    fn decode_tcp_state(value: Option<&str>) -> Option<String> {
+        match value? {
+            "01" => Some("ESTABLISHED".to_string()),
+            "02" => Some("SYN_SENT".to_string()),
+            "03" => Some("SYN_RECV".to_string()),
+            "04" => Some("FIN_WAIT1".to_string()),
+            "05" => Some("FIN_WAIT2".to_string()),
+            "06" => Some("TIME_WAIT".to_string()),
+            "07" => Some("CLOSE".to_string()),
+            "08" => Some("CLOSE_WAIT".to_string()),
+            "09" => Some("LAST_ACK".to_string()),
+            "0A" => Some("LISTEN".to_string()),
+            "0B" => Some("CLOSING".to_string()),
+            _ => Some("UNKNOWN".to_string()),
+        }
+    }
+
+    fn parse_file(proto: &str, path: &str, is_tcp: bool, out: &mut HashSet<events::SocketEntry>) -> io::Result<()> {
+        std::fs::read_to_string(path).map(|content| {
+            content.lines().enumerate().skip(1).for_each(|(_, line)| {
+                let cols = line.split_whitespace().collect::<Vec<_>>();
+                if cols.len() < 3 {
+                    return;
+                }
+
+                let local = cols[1].to_string();
+                let remote = cols[2].to_string();
+                let state = is_tcp.then(|| cols.get(3).map(|state| (*state).to_string())).flatten();
+                let state_dec = Self::decode_tcp_state(state.as_deref());
+                let is_v6 = proto.ends_with('6');
+                let local_dec = Self::decode_addr(&local, is_v6).unwrap_or(local.clone());
+                let remote_dec = Self::decode_addr(&remote, is_v6).unwrap_or(remote.clone());
+                let kind = if state_dec.as_deref() == Some("LISTEN")
+                    || (!is_tcp && (remote_dec == "0.0.0.0:0" || remote_dec == "::0:0"))
+                {
+                    events::SocketKind::Listener
+                } else {
+                    events::SocketKind::Connection
+                };
+
+                out.insert(events::SocketEntry {
+                    proto: proto.to_string(),
+                    local: local_dec,
+                    remote: remote_dec,
+                    state: state_dec,
+                    kind,
+                });
+            });
+        })
+    }
+}
+
+impl SocketBackend for LiveSocketBackend {
+    fn list(&self) -> io::Result<HashSet<events::SocketEntry>> {
+        let mut out = HashSet::new();
+        let _ = Self::parse_file("tcp", "/proc/net/tcp", true, &mut out);
+        let _ = Self::parse_file("tcp6", "/proc/net/tcp6", true, &mut out);
+        let _ = Self::parse_file("udp", "/proc/net/udp", false, &mut out);
+        let _ = Self::parse_file("udp6", "/proc/net/udp6", false, &mut out);
+        Ok(out)
+    }
+}
+
 #[async_trait]
 impl NetHealthBackend for LiveNetHealthBackend {
     async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration> {
@@ -169,6 +272,7 @@ pub struct NetToolsConfig {
     routes: bool,
     default_routes: bool,
     nethealth: bool,
+    sockets: bool,
     nethealth_window: usize,
     nethealth_timeout: Duration,
     nethealth_latency_degraded_ms: u64,
@@ -183,6 +287,7 @@ impl Default for NetToolsConfig {
             routes: true,
             default_routes: true,
             nethealth: false,
+            sockets: false,
             nethealth_window: 4,
             nethealth_timeout: Duration::from_secs(2),
             nethealth_latency_degraded_ms: 400,
@@ -221,6 +326,11 @@ impl NetToolsConfig {
         self
     }
 
+    pub fn sockets(mut self, sockets: bool) -> Self {
+        self.sockets = sockets;
+        self
+    }
+
     pub fn nethealth_window(mut self, nethealth_window: usize) -> Self {
         self.nethealth_window = nethealth_window.max(1);
         self
@@ -247,11 +357,13 @@ pub struct NetTools {
     hostname_backend: Arc<dyn HostnameBackend>,
     route_backend: Arc<dyn RouteBackend>,
     nethealth_backend: Arc<dyn NetHealthBackend>,
+    socket_backend: Arc<dyn SocketBackend>,
     last_hostname: Option<String>,
     last_routes: HashMap<RouteKey, events::RouteEntry>,
     nethealth_targets: Vec<events::NetHealthTarget>,
     nethealth_samples: VecDeque<NetHealthSample>,
     last_nethealth: Option<events::NetHealthState>,
+    last_sockets: HashSet<events::SocketEntry>,
 }
 
 impl Default for NetTools {
@@ -267,11 +379,13 @@ impl NetTools {
             hostname_backend: Arc::new(LiveHostnameBackend),
             route_backend: Arc::new(LiveRouteBackend),
             nethealth_backend: Arc::new(LiveNetHealthBackend),
+            socket_backend: Arc::new(LiveSocketBackend),
             last_hostname: None,
             last_routes: HashMap::new(),
             nethealth_targets: Vec::new(),
             nethealth_samples: VecDeque::new(),
             last_nethealth: None,
+            last_sockets: HashSet::new(),
         }
     }
 
@@ -296,6 +410,13 @@ impl NetTools {
         self.nethealth_backend = Arc::new(backend);
     }
 
+    pub fn set_socket_backend<B>(&mut self, backend: B)
+    where
+        B: SocketBackend + 'static,
+    {
+        self.socket_backend = Arc::new(backend);
+    }
+
     pub fn add_nethealth_target<S>(&mut self, host: S, port: u16)
     where
         S: Into<String>,
@@ -316,6 +437,10 @@ impl NetTools {
 
     fn poll_routes(&self) -> io::Result<Vec<events::RouteEntry>> {
         self.route_backend.list()
+    }
+
+    fn poll_sockets(&self) -> io::Result<HashSet<events::SocketEntry>> {
+        self.socket_backend.list()
     }
 
     fn store_hostname(&mut self, hostname: String) {
@@ -442,6 +567,38 @@ impl NetTools {
         }
     }
 
+    async fn handle_socket_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
+        let current_sockets = match self.poll_sockets() {
+            Ok(current_sockets) => current_sockets,
+            Err(err) => {
+                log::error!("nettools: failed to read sockets: {err}");
+                return;
+            }
+        };
+
+        for socket in current_sockets.difference(&self.last_sockets) {
+            Self::fire(
+                hub,
+                NetToolsEvent::SocketAdded {
+                    socket: socket.clone(),
+                },
+            )
+            .await;
+        }
+
+        for socket in self.last_sockets.difference(&current_sockets) {
+            Self::fire(
+                hub,
+                NetToolsEvent::SocketRemoved {
+                    socket: socket.clone(),
+                },
+            )
+            .await;
+        }
+
+        self.last_sockets = current_sockets;
+    }
+
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
         let current_hostname = match self.poll_hostname() {
             Ok(current_hostname) => current_hostname,
@@ -547,6 +704,10 @@ impl NetTools {
             self.last_nethealth = None;
         }
 
+        if self.cfg.sockets {
+            self.last_sockets = self.poll_sockets().unwrap_or_default();
+        }
+
         let mut ticker = tokio::time::interval(self.cfg.get_pulse());
 
         loop {
@@ -563,6 +724,10 @@ impl NetTools {
 
                     if self.cfg.nethealth {
                         self.handle_nethealth_poll(&ctx.hub).await;
+                    }
+
+                    if self.cfg.sockets {
+                        self.handle_socket_poll(&ctx.hub).await;
                     }
                 },
             }

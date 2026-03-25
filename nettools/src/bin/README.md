@@ -23,6 +23,10 @@ Available demos
   - Runs active probes against configured targets.
   - Prints events when connectivity becomes degraded or goes down.
 
+- `nettools-sockets`
+  - Watches live sockets, listeners, and connections.
+  - Prints events when sockets appear or disappear.
+
 How to run
 
 Run the hostname demo:
@@ -47,6 +51,12 @@ Run the network health demo:
 
 ```bash
 cargo run -p nettools --bin nettools-nethealth
+```
+
+Run the sockets demo:
+
+```bash
+cargo run -p nettools --bin nettools-sockets
 ```
 
 What to expect
@@ -255,6 +265,43 @@ Simulate link outage:
 ```bash
 sudo ip link set eth0 down
 sudo ip link set eth0 up
+```
+
+`nettools-sockets`
+
+- Start the binary.
+- Open or close listeners and client connections in another shell.
+- The demo prints lines such as:
+
+```text
+socket added: tcp listener 0.0.0.0:8080 -> 0.0.0.0:0 state=LISTEN
+socket removed: tcp connection 10.0.0.5:54544 -> 10.0.0.10:443 state=ESTABLISHED
+```
+
+Examples for socket and listener changes
+
+Open a TCP listener with `nc`:
+
+```bash
+nc -l 127.0.0.1 8080
+```
+
+Open a client connection with `nc`:
+
+```bash
+nc 127.0.0.1 8080
+```
+
+Open a listener with Python if `nc` is not available:
+
+```bash
+python3 -m http.server 8080
+```
+
+Inspect what your system already exposes:
+
+```bash
+ss -lntup
 ```
 
 Notes

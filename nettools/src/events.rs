@@ -38,6 +38,21 @@ pub struct NetHealthState {
     pub total_probes: usize,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SocketKind {
+    Listener,
+    Connection,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketEntry {
+    pub proto: String,
+    pub local: String,
+    pub remote: String,
+    pub state: Option<String>,
+    pub kind: SocketKind,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetToolsEvent {
     HostnameChanged { old: String, new: String },
@@ -48,6 +63,8 @@ pub enum NetToolsEvent {
     DefaultRouteRemoved { route: RouteEntry },
     DefaultRouteChanged { old: RouteEntry, new: RouteEntry },
     NetHealthChanged { old: NetHealthState, new: NetHealthState },
+    SocketAdded { socket: SocketEntry },
+    SocketRemoved { socket: SocketEntry },
 }
 
 bitflags! {
@@ -61,6 +78,8 @@ bitflags! {
         const DEFAULT_ROUTE_REMOVED = 0b0100000;
         const DEFAULT_ROUTE_CHANGED = 0b1000000;
         const NETHEALTH_CHANGED     = 0b10000000;
+        const SOCKET_ADDED          = 0b100000000;
+        const SOCKET_REMOVED        = 0b1000000000;
     }
 }
 
@@ -75,6 +94,8 @@ impl NetToolsEvent {
             NetToolsEvent::DefaultRouteRemoved { .. } => NetToolsMask::DEFAULT_ROUTE_REMOVED,
             NetToolsEvent::DefaultRouteChanged { .. } => NetToolsMask::DEFAULT_ROUTE_CHANGED,
             NetToolsEvent::NetHealthChanged { .. } => NetToolsMask::NETHEALTH_CHANGED,
+            NetToolsEvent::SocketAdded { .. } => NetToolsMask::SOCKET_ADDED,
+            NetToolsEvent::SocketRemoved { .. } => NetToolsMask::SOCKET_REMOVED,
         }
     }
 }
