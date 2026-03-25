@@ -16,6 +16,28 @@ pub struct RouteEntry {
     pub iface: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetHealthLevel {
+    Healthy,
+    Degraded,
+    Down,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetHealthTarget {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetHealthState {
+    pub level: NetHealthLevel,
+    pub avg_rtt_ms: Option<u64>,
+    pub loss_pct: u8,
+    pub successful_probes: usize,
+    pub total_probes: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetToolsEvent {
     HostnameChanged { old: String, new: String },
@@ -25,6 +47,7 @@ pub enum NetToolsEvent {
     DefaultRouteAdded { route: RouteEntry },
     DefaultRouteRemoved { route: RouteEntry },
     DefaultRouteChanged { old: RouteEntry, new: RouteEntry },
+    NetHealthChanged { old: NetHealthState, new: NetHealthState },
 }
 
 bitflags! {
@@ -37,6 +60,7 @@ bitflags! {
         const DEFAULT_ROUTE_ADDED   = 0b0010000;
         const DEFAULT_ROUTE_REMOVED = 0b0100000;
         const DEFAULT_ROUTE_CHANGED = 0b1000000;
+        const NETHEALTH_CHANGED     = 0b10000000;
     }
 }
 
@@ -50,6 +74,7 @@ impl NetToolsEvent {
             NetToolsEvent::DefaultRouteAdded { .. } => NetToolsMask::DEFAULT_ROUTE_ADDED,
             NetToolsEvent::DefaultRouteRemoved { .. } => NetToolsMask::DEFAULT_ROUTE_REMOVED,
             NetToolsEvent::DefaultRouteChanged { .. } => NetToolsMask::DEFAULT_ROUTE_CHANGED,
+            NetToolsEvent::NetHealthChanged { .. } => NetToolsMask::NETHEALTH_CHANGED,
         }
     }
 }

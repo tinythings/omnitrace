@@ -1,4 +1,7 @@
-use crate::{HostnameBackend, NetTools, NetToolsConfig, RouteBackend, events::{NetToolsEvent, RouteEntry, RouteFamily}};
+use crate::{
+    HostnameBackend, NetHealthBackend, NetTools, NetToolsConfig, RouteBackend,
+    events::{NetHealthLevel, NetToolsEvent, NetHealthTarget, RouteEntry, RouteFamily},
+};
 use async_trait::async_trait;
 use omnitrace_core::{
     callbacks::{Callback, CallbackHub, CallbackResult},
@@ -39,6 +42,52 @@ impl HostnameBackend for SequenceBackend {
     }
 }
 
+struct SequenceRouteBackend {
+    values: Mutex<VecDeque<io::Result<Vec<RouteEntry>>>>,
+    last: Mutex<Option<Vec<RouteEntry>>>,
+}
+
+impl SequenceRouteBackend {
+    fn new(values: Vec<io::Result<Vec<RouteEntry>>>) -> Self {
+        Self { values: Mutex::new(values.into()), last: Mutex::new(None) }
+    }
+}
+
+impl RouteBackend for SequenceRouteBackend {
+    fn list(&self) -> io::Result<Vec<RouteEntry>> {
+        if let Some(value) = self.values.lock().unwrap().pop_front() {
+            if let Ok(routes) = &value {
+                *self.last.lock().unwrap() = Some(routes.clone());
+            }
+
+            return value;
+        }
+
+        Ok(self.last.lock().unwrap().clone().unwrap_or_default())
+    }
+}
+
+struct SequenceNetHealthBackend {
+    values: Mutex<VecDeque<io::Result<Duration>>>,
+}
+
+impl SequenceNetHealthBackend {
+    fn new(values: Vec<io::Result<Duration>>) -> Self {
+        Self { values: Mutex::new(values.into()) }
+    }
+}
+
+#[async_trait]
+impl NetHealthBackend for SequenceNetHealthBackend {
+    async fn probe(&self, _target: &NetHealthTarget, _probe_timeout: Duration) -> io::Result<Duration> {
+        self.values
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, "no more probe data")))
+    }
+}
+
 struct JsonCb;
 
 #[async_trait]
@@ -70,32 +119,10 @@ impl Callback<NetToolsEvent> for JsonCb {
             NetToolsEvent::DefaultRouteChanged { old, new } => {
                 Some(serde_json::json!({ "event": "default_route_changed", "old": old, "new": new }))
             }
-        }
-    }
-}
-
-struct SequenceRouteBackend {
-    values: Mutex<VecDeque<io::Result<Vec<RouteEntry>>>>,
-    last: Mutex<Option<Vec<RouteEntry>>>,
-}
-
-impl SequenceRouteBackend {
-    fn new(values: Vec<io::Result<Vec<RouteEntry>>>) -> Self {
-        Self { values: Mutex::new(values.into()), last: Mutex::new(None) }
-    }
-}
-
-impl RouteBackend for SequenceRouteBackend {
-    fn list(&self) -> io::Result<Vec<RouteEntry>> {
-        if let Some(value) = self.values.lock().unwrap().pop_front() {
-            if let Ok(routes) = &value {
-                *self.last.lock().unwrap() = Some(routes.clone());
+            NetToolsEvent::NetHealthChanged { old, new } => {
+                Some(serde_json::json!({ "event": "nethealth_changed", "old": old, "new": new }))
             }
-
-            return value;
         }
-
-        Ok(self.last.lock().unwrap().clone().unwrap_or_default())
     }
 }
 
@@ -151,7 +178,10 @@ async fn does_not_emit_when_hostname_is_unchanged() {
 #[tokio::test]
 async fn emits_route_added_event() {
     let mut sensor = NetTools::new(Some(NetToolsConfig::default().pulse(Duration::from_millis(10)).hostname(false).routes(true)));
-    sensor.set_route_backend(SequenceRouteBackend::new(vec![Ok(vec![route("default", "10.0.0.1", "em0")]), Ok(vec![route("default", "10.0.0.1", "em0"), route("10.1.0.0/16", "10.0.0.2", "em0")])]));
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![route("default", "10.0.0.1", "em0")]),
+        Ok(vec![route("default", "10.0.0.1", "em0"), route("10.1.0.0/16", "10.0.0.2", "em0")]),
+    ]));
 
     let (tx, mut rx) = channel::<CallbackResult>(4);
     let mut hub = CallbackHub::<NetToolsEvent>::new();
@@ -171,7 +201,10 @@ async fn emits_route_added_event() {
 #[tokio::test]
 async fn emits_route_changed_event() {
     let mut sensor = NetTools::new(Some(NetToolsConfig::default().pulse(Duration::from_millis(10)).hostname(false).routes(true)));
-    sensor.set_route_backend(SequenceRouteBackend::new(vec![Ok(vec![route("default", "10.0.0.1", "em0")]), Ok(vec![route("default", "10.0.0.254", "em1")])]));
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![route("default", "10.0.0.1", "em0")]),
+        Ok(vec![route("default", "10.0.0.254", "em1")]),
+    ]));
 
     let (tx, mut rx) = channel::<CallbackResult>(4);
     let mut hub = CallbackHub::<NetToolsEvent>::new();
@@ -194,7 +227,10 @@ async fn emits_default_route_added_event() {
     let mut sensor = NetTools::new(
         Some(NetToolsConfig::default().pulse(Duration::from_millis(10)).hostname(false).routes(false).default_routes(true)),
     );
-    sensor.set_route_backend(SequenceRouteBackend::new(vec![Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0")]), Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0"), route("default", "10.0.0.1", "em0")])]));
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0")]),
+        Ok(vec![route("10.1.0.0/16", "10.0.0.2", "em0"), route("default", "10.0.0.1", "em0")]),
+    ]));
 
     let (tx, mut rx) = channel::<CallbackResult>(4);
     let mut hub = CallbackHub::<NetToolsEvent>::new();
@@ -216,7 +252,10 @@ async fn emits_default_route_changed_event() {
     let mut sensor = NetTools::new(
         Some(NetToolsConfig::default().pulse(Duration::from_millis(10)).hostname(false).routes(false).default_routes(true)),
     );
-    sensor.set_route_backend(SequenceRouteBackend::new(vec![Ok(vec![route("default", "10.0.0.1", "em0")]), Ok(vec![route("default", "10.0.0.254", "em1")])]));
+    sensor.set_route_backend(SequenceRouteBackend::new(vec![
+        Ok(vec![route("default", "10.0.0.1", "em0")]),
+        Ok(vec![route("default", "10.0.0.254", "em1")]),
+    ]));
 
     let (tx, mut rx) = channel::<CallbackResult>(4);
     let mut hub = CallbackHub::<NetToolsEvent>::new();
@@ -232,4 +271,75 @@ async fn emits_default_route_changed_event() {
     assert_eq!(event["event"], "default_route_changed");
     assert_eq!(event["old"]["gateway"], "10.0.0.1");
     assert_eq!(event["new"]["gateway"], "10.0.0.254");
+}
+
+#[tokio::test]
+async fn emits_nethealth_changed_event_for_latency_spike() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .nethealth(true)
+                .nethealth_window(1)
+                .nethealth_latency_degraded_ms(200),
+        ),
+    );
+    sensor.add_nethealth_target("probe.example", 443);
+    sensor.set_nethealth_backend(SequenceNetHealthBackend::new(vec![
+        Ok(Duration::from_millis(50)),
+        Ok(Duration::from_millis(600)),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "nethealth_changed");
+    assert_eq!(event["old"]["level"], serde_json::json!(NetHealthLevel::Healthy));
+    assert_eq!(event["new"]["level"], serde_json::json!(NetHealthLevel::Degraded));
+}
+
+#[tokio::test]
+async fn emits_nethealth_changed_event_for_connectivity_loss() {
+    let mut sensor = NetTools::new(
+        Some(
+            NetToolsConfig::default()
+                .pulse(Duration::from_millis(10))
+                .hostname(false)
+                .routes(false)
+                .default_routes(false)
+                .nethealth(true)
+                .nethealth_window(1),
+        ),
+    );
+    sensor.add_nethealth_target("probe.example", 443);
+    sensor.set_nethealth_backend(SequenceNetHealthBackend::new(vec![
+        Ok(Duration::from_millis(50)),
+        Err(io::Error::new(io::ErrorKind::TimedOut, "timeout")),
+    ]));
+
+    let (tx, mut rx) = channel::<CallbackResult>(4);
+    let mut hub = CallbackHub::<NetToolsEvent>::new();
+    hub.add(JsonCb);
+    hub.set_result_channel(tx);
+
+    let (handle, sensor_task) = spawn_sensor(sensor, Arc::new(hub));
+    let event = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await.unwrap().unwrap();
+
+    handle.shutdown();
+    let _ = sensor_task.await;
+
+    assert_eq!(event["event"], "nethealth_changed");
+    assert_eq!(event["old"]["level"], serde_json::json!(NetHealthLevel::Healthy));
+    assert_eq!(event["new"]["level"], serde_json::json!(NetHealthLevel::Down));
 }

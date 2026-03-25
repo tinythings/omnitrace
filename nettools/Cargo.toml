@@ -29,3 +29,7 @@ path = "src/bin/nettools-routes.rs"
 [[bin]]
 name = "nettools-default-route"
 path = "src/bin/nettools-default-route.rs"
+
+[[bin]]
+name = "nettools-nethealth"
+path = "src/bin/nettools-nethealth.rs"

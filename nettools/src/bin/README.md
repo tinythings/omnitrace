@@ -19,6 +19,10 @@ Available demos
   - Watches the default route specifically.
   - Prints events when the default route is added, removed, or changed.
 
+- `nettools-nethealth`
+  - Runs active probes against configured targets.
+  - Prints events when connectivity becomes degraded or goes down.
+
 How to run
 
 Run the hostname demo:
@@ -37,6 +41,12 @@ Run the default route demo:
 
 ```bash
 cargo run -p nettools --bin nettools-default-route
+```
+
+Run the network health demo:
+
+```bash
+cargo run -p nettools --bin nettools-nethealth
 ```
 
 What to expect
@@ -209,6 +219,42 @@ Change default route:
 ```bash
 sudo route delete default 192.168.1.1
 sudo route add default 192.168.1.254
+```
+
+`nettools-nethealth`
+
+- Start the binary.
+- Interrupt connectivity, add latency, or drop packets in another shell.
+- The demo prints lines such as:
+
+```text
+nethealth changed: Healthy avg=Some(42)ms loss=0 -> Degraded avg=Some(780)ms loss=0
+nethealth changed: Degraded avg=Some(780)ms loss=0 -> Down avg=None loss=100
+```
+
+Examples for network hiccups
+
+Linux:
+
+Simulate packet loss:
+
+```bash
+sudo tc qdisc add dev eth0 root netem loss 40%
+sudo tc qdisc del dev eth0 root
+```
+
+Simulate latency spike:
+
+```bash
+sudo tc qdisc add dev eth0 root netem delay 800ms
+sudo tc qdisc del dev eth0 root
+```
+
+Simulate link outage:
+
+```bash
+sudo ip link set eth0 down
+sudo ip link set eth0 up
 ```
 
 Notes

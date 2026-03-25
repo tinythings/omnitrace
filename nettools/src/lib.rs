@@ -4,19 +4,22 @@ pub mod events;
 mod nettools_ut;
 
 use crate::events::NetToolsEvent;
+use async_trait::async_trait;
 use omnitrace_core::{
     callbacks::CallbackHub,
     sensor::{Sensor, SensorCtx},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     io,
+    net::ToSocketAddrs,
     pin::Pin,
     process::Command,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
+use tokio::{net::TcpStream, time::timeout};
 
 pub trait HostnameBackend: Send + Sync {
     fn current(&self) -> io::Result<String>;
@@ -26,13 +29,26 @@ pub trait RouteBackend: Send + Sync {
     fn list(&self) -> io::Result<Vec<events::RouteEntry>>;
 }
 
+#[async_trait]
+pub trait NetHealthBackend: Send + Sync {
+    async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration>;
+}
+
 pub struct LiveHostnameBackend;
 pub struct LiveRouteBackend;
+pub struct LiveNetHealthBackend;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RouteKey {
     family: events::RouteFamily,
     destination: String,
+}
+
+#[derive(Clone, Debug)]
+struct NetHealthSample {
+    total_probes: usize,
+    successful_probes: usize,
+    latency_sum_ms: u64,
 }
 
 impl LiveHostnameBackend {
@@ -131,16 +147,47 @@ impl RouteBackend for LiveRouteBackend {
     }
 }
 
+#[async_trait]
+impl NetHealthBackend for LiveNetHealthBackend {
+    async fn probe(&self, target: &events::NetHealthTarget, probe_timeout: Duration) -> io::Result<Duration> {
+        let start_time = Instant::now();
+        let socket_address = format!("{}:{}", target.host, target.port)
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no socket address resolved"))?;
+
+        timeout(probe_timeout, TcpStream::connect(socket_address))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "probe timeout"))?
+            .map(|_| start_time.elapsed())
+    }
+}
+
 pub struct NetToolsConfig {
     pulse: Duration,
     hostname: bool,
     routes: bool,
     default_routes: bool,
+    nethealth: bool,
+    nethealth_window: usize,
+    nethealth_timeout: Duration,
+    nethealth_latency_degraded_ms: u64,
+    nethealth_loss_degraded_pct: u8,
 }
 
 impl Default for NetToolsConfig {
     fn default() -> Self {
-        Self { pulse: Duration::from_secs(3), hostname: true, routes: true, default_routes: true }
+        Self {
+            pulse: Duration::from_secs(3),
+            hostname: true,
+            routes: true,
+            default_routes: true,
+            nethealth: false,
+            nethealth_window: 4,
+            nethealth_timeout: Duration::from_secs(2),
+            nethealth_latency_degraded_ms: 400,
+            nethealth_loss_degraded_pct: 25,
+        }
     }
 }
 
@@ -168,14 +215,43 @@ impl NetToolsConfig {
         self.default_routes = default_routes;
         self
     }
+
+    pub fn nethealth(mut self, nethealth: bool) -> Self {
+        self.nethealth = nethealth;
+        self
+    }
+
+    pub fn nethealth_window(mut self, nethealth_window: usize) -> Self {
+        self.nethealth_window = nethealth_window.max(1);
+        self
+    }
+
+    pub fn nethealth_timeout(mut self, nethealth_timeout: Duration) -> Self {
+        self.nethealth_timeout = nethealth_timeout;
+        self
+    }
+
+    pub fn nethealth_latency_degraded_ms(mut self, nethealth_latency_degraded_ms: u64) -> Self {
+        self.nethealth_latency_degraded_ms = nethealth_latency_degraded_ms;
+        self
+    }
+
+    pub fn nethealth_loss_degraded_pct(mut self, nethealth_loss_degraded_pct: u8) -> Self {
+        self.nethealth_loss_degraded_pct = nethealth_loss_degraded_pct;
+        self
+    }
 }
 
 pub struct NetTools {
     cfg: NetToolsConfig,
     hostname_backend: Arc<dyn HostnameBackend>,
     route_backend: Arc<dyn RouteBackend>,
+    nethealth_backend: Arc<dyn NetHealthBackend>,
     last_hostname: Option<String>,
     last_routes: HashMap<RouteKey, events::RouteEntry>,
+    nethealth_targets: Vec<events::NetHealthTarget>,
+    nethealth_samples: VecDeque<NetHealthSample>,
+    last_nethealth: Option<events::NetHealthState>,
 }
 
 impl Default for NetTools {
@@ -190,8 +266,12 @@ impl NetTools {
             cfg: cfg.unwrap_or_default(),
             hostname_backend: Arc::new(LiveHostnameBackend),
             route_backend: Arc::new(LiveRouteBackend),
+            nethealth_backend: Arc::new(LiveNetHealthBackend),
             last_hostname: None,
             last_routes: HashMap::new(),
+            nethealth_targets: Vec::new(),
+            nethealth_samples: VecDeque::new(),
+            last_nethealth: None,
         }
     }
 
@@ -207,6 +287,23 @@ impl NetTools {
         B: RouteBackend + 'static,
     {
         self.route_backend = Arc::new(backend);
+    }
+
+    pub fn set_nethealth_backend<B>(&mut self, backend: B)
+    where
+        B: NetHealthBackend + 'static,
+    {
+        self.nethealth_backend = Arc::new(backend);
+    }
+
+    pub fn add_nethealth_target<S>(&mut self, host: S, port: u16)
+    where
+        S: Into<String>,
+    {
+        self.nethealth_targets.push(events::NetHealthTarget {
+            host: host.into(),
+            port,
+        });
     }
 
     async fn fire(hub: &CallbackHub<NetToolsEvent>, ev: NetToolsEvent) {
@@ -242,6 +339,107 @@ impl NetTools {
 
     fn default_route(routes: &HashMap<RouteKey, events::RouteEntry>) -> Option<events::RouteEntry> {
         routes.values().find(|route| Self::is_default_route(route)).cloned()
+    }
+
+    fn trim_nethealth_samples(&mut self) {
+        while self.nethealth_samples.len() > self.cfg.nethealth_window {
+            self.nethealth_samples.pop_front();
+        }
+    }
+
+    fn nethealth_state(&self) -> Option<events::NetHealthState> {
+        if self.nethealth_samples.is_empty() {
+            return None;
+        }
+
+        let (total_probes, successful_probes, latency_sum_ms) = self.nethealth_samples.iter().fold(
+            (0usize, 0usize, 0u64),
+            |(total_probes, successful_probes, latency_sum_ms), sample| {
+                (
+                    total_probes + sample.total_probes,
+                    successful_probes + sample.successful_probes,
+                    latency_sum_ms + sample.latency_sum_ms,
+                )
+            },
+        );
+
+        if total_probes == 0 {
+            return None;
+        }
+
+        let loss_pct = (((total_probes - successful_probes) * 100) / total_probes) as u8;
+        let avg_rtt_ms = if successful_probes > 0 {
+            Some(latency_sum_ms / successful_probes as u64)
+        } else {
+            None
+        };
+        let level = if successful_probes == 0 {
+            events::NetHealthLevel::Down
+        } else if loss_pct >= self.cfg.nethealth_loss_degraded_pct
+            || avg_rtt_ms.is_some_and(|avg_rtt_ms| avg_rtt_ms >= self.cfg.nethealth_latency_degraded_ms)
+        {
+            events::NetHealthLevel::Degraded
+        } else {
+            events::NetHealthLevel::Healthy
+        };
+
+        Some(events::NetHealthState {
+            level,
+            avg_rtt_ms,
+            loss_pct,
+            successful_probes,
+            total_probes,
+        })
+    }
+
+    async fn nethealth_sample(&self) -> NetHealthSample {
+        let mut total_probes = 0usize;
+        let mut successful_probes = 0usize;
+        let mut latency_sum_ms = 0u64;
+
+        for target in &self.nethealth_targets {
+            total_probes += 1;
+            if let Ok(duration) = self
+                .nethealth_backend
+                .probe(target, self.cfg.nethealth_timeout)
+                .await
+            {
+                successful_probes += 1;
+                latency_sum_ms += duration.as_millis() as u64;
+            }
+        }
+
+        NetHealthSample {
+            total_probes,
+            successful_probes,
+            latency_sum_ms,
+        }
+    }
+
+    async fn handle_nethealth_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
+        if self.nethealth_targets.is_empty() {
+            return;
+        }
+
+        self.nethealth_samples.push_back(self.nethealth_sample().await);
+        self.trim_nethealth_samples();
+
+        if let Some(current_nethealth) = self.nethealth_state() {
+            if let Some(previous_nethealth) = self.last_nethealth.as_ref()
+                && previous_nethealth != &current_nethealth
+            {
+                Self::fire(
+                    hub,
+                    NetToolsEvent::NetHealthChanged {
+                        old: previous_nethealth.clone(),
+                        new: current_nethealth.clone(),
+                    },
+                )
+                .await;
+            }
+
+            self.last_nethealth = Some(current_nethealth);
+        }
     }
 
     async fn handle_hostname_poll(&mut self, hub: &CallbackHub<NetToolsEvent>) {
@@ -345,6 +543,10 @@ impl NetTools {
             self.last_routes = Self::route_map(self.poll_routes().unwrap_or_default());
         }
 
+        if self.cfg.nethealth {
+            self.last_nethealth = None;
+        }
+
         let mut ticker = tokio::time::interval(self.cfg.get_pulse());
 
         loop {
@@ -357,6 +559,10 @@ impl NetTools {
 
                     if self.cfg.routes || self.cfg.default_routes {
                         self.handle_route_poll(&ctx.hub).await;
+                    }
+
+                    if self.cfg.nethealth {
+                        self.handle_nethealth_poll(&ctx.hub).await;
                     }
                 },
             }

@@ -12,6 +12,8 @@ Right now it can:
 - read the routing table
 - emit route added, removed, and changed events
 - detect default route changes as first-class events
+- run active network health probes
+- emit nethealth change events for latency spikes, loss, and outages
 
 This crate is intended to hold things such as:
 
@@ -28,3 +30,4 @@ Example binaries:
 - `cargo run -p nettools --bin nettools-hostchange`
 - `cargo run -p nettools --bin nettools-routes`
 - `cargo run -p nettools --bin nettools-default-route`
+- `cargo run -p nettools --bin nettools-nethealth`
