@@ -54,7 +54,7 @@ pub fn reverse_dns(ip: std::net::IpAddr) -> Option<String> {
     use std::ffi::CStr;
 
     unsafe {
-        let mut host = [0i8; 1025];
+        let mut host = [0 as libc::c_char; 1025];
 
         let rc = match ip {
             std::net::IpAddr::V4(v4) => {

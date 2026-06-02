@@ -79,7 +79,7 @@ impl LinuxRtNetlinkBackend {
     }
 
     fn ifname_from_index(ifindex: u32) -> String {
-        let mut buf = [0i8; libc::IF_NAMESIZE];
+        let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
         let p = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr()) };
         if p.is_null() {
             format!("if#{ifindex}")

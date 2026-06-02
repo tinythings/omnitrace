@@ -149,7 +149,7 @@ impl SockTray {
 
     fn reverse_dns(ip: IpAddr) -> Option<String> {
         unsafe {
-            let mut host = [0i8; 1025];
+            let mut host = [0 as libc::c_char; 1025];
 
             let rc = match ip {
                 IpAddr::V4(v4) => {
